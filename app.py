@@ -9,13 +9,18 @@ st.markdown("""
 <style>
 html, body, [data-testid="stAppViewContainer"] { background-color: #F8F9FA !important; font-family: sans-serif; }
 [data-testid="stSidebar"] { background-color: #FFFFFF !important; border-right: 1px solid #E2E8F0; }
-.verdict-box { background: #FFF; border-left: 4px solid #3182CE; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; border: 1px solid #E2E8F0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-.verdict-title { font-size: 1.2rem; font-weight: 700; margin-bottom: 0.5rem; color: #1A202C; }
-.verdict-badge { display: inline-block; background: #EDF2F7; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; color: #4A5568; margin-left: 6px; font-weight: normal; }
-.verdict-row { margin-top: 0.5rem; padding: 0.5rem; border-radius: 4px; font-size: 0.9rem; }
+.verdict-box { background: #FFF; border-left: 4px solid #3182CE; border-radius: 6px; padding: 1.25rem; margin-bottom: 1.5rem; border: 1px solid #E2E8F0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+.verdict-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 0.25rem; color: #1A202C; }
+.verdict-var { font-size: 0.85rem; color: #718096; margin-bottom: 1rem; font-family: monospace; }
+.verdict-badge { display: inline-block; background: #EDF2F7; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; color: #4A5568; margin-left: 8px; font-weight: normal; }
+.verdict-row { margin-top: 0.5rem; padding: 0.75rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.5; }
 .db-confirmed { background: #F0FFF4; border-left: 3px solid #38A169; }
 .db-predicted { background: #EBF8FF; border-left: 3px solid #3182CE; }
 .db-missing { background: #EDF2F7; border-left: 3px solid #A0AEC0; }
+.disease-list { margin-top: 0.5rem; padding-left: 1rem; }
+.disease-item { margin-bottom: 0.5rem; }
+.disease-name { font-weight: 600; color: #2D3748; }
+.symptom-list { font-size: 0.85rem; color: #4A5568; margin-top: 0.25rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -43,8 +48,8 @@ with st.sidebar:
 
 st.title(f"Кейс: {selected}")
 
-if st.button("🔬 Проанализировать", use_container_width=True, type="primary"):
-    with st.spinner("Анализ баз данных (ClinVar, OMIM, VEP)..."):
+if st.button("Проанализировать", use_container_width=True, type="primary"):
+    with st.spinner("Анализ баз данных..."):
         case = load_case(selected, PROJECT_ROOT)
         if case is None:
             st.error("Файлы не найдены.")
@@ -57,17 +62,66 @@ if st.session_state["result"] is not None and st.session_state["case_id"] == sel
     result = st.session_state["result"]
     case = st.session_state["case_raw"]
     
+    if result.empty:
+        st.warning(no_candidate_reason(result))
+    else:
+        num_found = len(result)
+        if num_found == 1: st.subheader("Найден 1 ген-кандидат")
+        elif num_found <= 5: st.subheader(f"Найдено {num_found} гена-кандидата")
+        else: st.subheader("Топ-5 генов-кандидатов")
+            
+        top5 = result.head(5)
+        
+        for i, (_, row) in enumerate(top5.iterrows(), 1):
+            st.markdown(f"""
+            <div class="verdict-box">
+                <div class="verdict-title">{i}. {row['gene']} 
+                    <span class="verdict-badge">Score: {row['priority_score']}</span>
+                    <span class="verdict-badge">Confidence: {row['confidence']}</span>
+                </div>
+                <div class="verdict-var">Вариант: {row['variant']}</div>
+            """, unsafe_allow_html=True)
+            
+            def render_verdict(v, title):
+                css_class = "db-confirmed" if v['kind'] == "confirmed" else ("db-predicted" if v['kind'] == "predicted" else "db-missing")
+                st.markdown(f"<div class='verdict-row {css_class}'><b>{title}</b> ({v['source']}): {v['verdict']}. <span style='color:#4A5568;'>{v['detail']}</span></div>", unsafe_allow_html=True)
+
+            render_verdict(row["clinvar_verdict"], "Клиническая значимость")
+            render_verdict(row["impact_verdict"], "Функциональный эффект")
+            render_verdict(row["phenotype_verdict"], "Совпадение симптомов")
+            render_verdict(row["inheritance_verdict"], "Соответствие наследованию")
+            
+            # --- ВЫВОД БОЛЕЗНЕЙ И СИМПТОМОВ ---
+            dv = row["disease_verdict"]
+            st.markdown(f"<div class='verdict-row db-confirmed'><b>Связь с болезнью</b> ({dv['source']}): {dv['detail']}</div>", unsafe_allow_html=True)
+            
+            if dv["diseases"]:
+                st.markdown("<div class='disease-list'>", unsafe_allow_html=True)
+                for dis in dv["diseases"]:
+                    matched = dis.get("matched_symptoms", [])
+                    matched_str = ", ".join(matched) if matched else "нет прямых совпадений"
+                    st.markdown(f"""
+                    <div class='disease-item'>
+                        <span class='disease-name'>{dis['name']}</span> (OMIM:{dis['id']})
+                        <div class='symptom-list'>
+                            <b>Всего симптомов в базе:</b> {dis['symptoms_count']} <br>
+                            <b>Совпало с пациентом:</b> {matched_str}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+            st.markdown("</div>", unsafe_allow_html=True)
+            
     st.markdown("---")
-    st.subheader("➕ Дополнительная задача: уточнить клиническую картину")
-    st.markdown("Измените симптомы или тип наследования, чтобы увидеть, как это повлияет на рейтинг.")
-    
+    st.subheader("Дополнительная задача: уточнить клиническую картину")
     col1, col2 = st.columns(2)
     with col1:
         inh_mode = st.selectbox("Ожидаемый тип наследования", ["Не учитывать", "Доминантный (AD)", "Рецессивный (AR)", "X-сцепленный (XL)"])
     with col2:
         new_hpo = st.text_input("Добавить HPO-термины (через запятую)", placeholder="HP:0002616, HP:0001643")
         
-    if st.button("🔄 Пересчитать рейтинг", type="secondary"):
+    if st.button("Пересчитать рейтинг", type="secondary"):
         with st.spinner("Пересчет..."):
             case_mod = dict(case)
             if new_hpo.strip():
@@ -76,31 +130,3 @@ if st.session_state["result"] is not None and st.session_state["case_id"] == sel
                 case_mod["phenotype"]["phenotypicFeatures"] = list(case["phenotype"].get("phenotypicFeatures", [])) + new_feats
             st.session_state["result"] = score_case(case_mod, max_af, inheritance_mode=inh_mode)
             st.rerun()
-            
-    st.markdown("---")
-    
-    result = st.session_state["result"]
-    if result.empty:
-        st.warning(no_candidate_reason(result))
-    else:
-        top5 = result.head(5)
-        st.subheader("Топ-5 генов-кандидатов")
-        
-        for i, (_, row) in enumerate(top5.iterrows(), 1):
-            st.markdown(f"""
-            <div class="verdict-box">
-                <div class="verdict-title">{i}. {row['gene']} 
-                    <span class="verdict-badge">Скор: {row['priority_score']}</span>
-                    <span class="verdict-badge">Уверенность: {row['confidence']}</span>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            def render_verdict(v, title):
-                css_class = "db-confirmed" if v['kind'] == "confirmed" else ("db-predicted" if v['kind'] == "predicted" else "db-missing")
-                st.markdown(f"<div class='verdict-row {css_class}'><b>{title}</b> ({v['source']}): {v['verdict']}. <span style='color:#4A5568;font-size:0.85em;'>{v['detail']}</span></div>", unsafe_allow_html=True)
-
-            render_verdict(row["clinvar_verdict"], "Клиническая значимость")
-            render_verdict(row["omim_verdict"], "Связь с болезнью")
-            render_verdict(row["clingen_verdict"], "Валидация гена")
-            render_verdict(row["phenotype_verdict"], "Совпадение симптомов")
-            st.markdown("</div>", unsafe_allow_html=True)
