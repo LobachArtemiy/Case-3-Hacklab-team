@@ -2,10 +2,11 @@ import json
 from pathlib import Path
 import pandas as pd
 
+# Веса строго по ACMG (фенотип, база, прогноз, редкость)
 WEIGHTS = {"phenotype": 0.50, "clinvar": 0.30, "impact": 0.15, "rare": 0.05}
 
 def load_case(case_id: str, project_root: Path) -> dict:
-    # Ищем ВООБЩЕ ВСЕ файлы с таким ID в проекте
+    # Умный поиск: ищем файлы во ВСЕХ подпапках (development, hidden и т.д.)
     meta_files = list(project_root.rglob(f"{case_id}_metadata.json"))
     if not meta_files:
         return None
@@ -25,7 +26,8 @@ def load_case(case_id: str, project_root: Path) -> dict:
         variants = pd.read_csv(var_path, sep="\t")
         source = "raw"
 
-    return {"case_id": case_id, "phenotype": phenotype, "variants": variants, "variant_source": source}
+    return {"case_id": case_id, "phenotype": phenotype, "variants": variants, 
+            "variant_source": source, "path": str(actual_dir)}
 
 def patient_hpo_terms(phenotype: dict) -> list:
     return [f["type"]["id"] for f in phenotype.get("phenotypicFeatures", [])
@@ -36,27 +38,28 @@ def filter_rare(df: pd.DataFrame, max_af: float = 0.01) -> pd.DataFrame:
     af = pd.to_numeric(df["population_AF"], errors="coerce")
     return df[(af.isna()) | (af < max_af)].copy()
 
+# --- Вердикты (разделение на источники) ---
 def clinvar_verdict(sig) -> dict:
     s = str(sig).strip().lower()
-    base = {"source": "ClinVar"}
-    if s in ("na", "nan", "", "none"): return {**base, "score": 0.1, "verdict": "Нет данных", "kind": "missing", "detail": "Не подтверждено."}
-    if "pathogenic" in s and "benign" not in s: return {**base, "score": 1.0, "verdict": "Патогенный", "kind": "confirmed", "detail": "Подтверждено."}
-    if "uncertain" in s: return {**base, "score": 0.5, "verdict": "VUS", "kind": "uncertain", "detail": "Неопределенное значение."}
-    if "benign" in s: return {**base, "score": 0.0, "verdict": "Доброкачественный", "kind": "benign", "detail": "Отсеивается."}
-    return {**base, "score": 0.2, "verdict": "Другое", "kind": "other", "detail": "Требует проверки."}
+    base = {"source": "ClinVar (База данных)", "kind": "confirmed"}
+    if s in ("na", "nan", "", "none"): return {**base, "score": 0.1, "verdict": "Нет данных", "detail": "Не подтверждено базой."}
+    if "pathogenic" in s and "benign" not in s: return {**base, "score": 1.0, "verdict": "Патогенный", "detail": "Подтверждено (PVS1/PS1)."}
+    if "uncertain" in s: return {**base, "score": 0.5, "verdict": "VUS", "detail": "Неопределенное значение."}
+    if "benign" in s: return {**base, "score": 0.0, "verdict": "Доброкачественный", "detail": "Отсеивается как ложная находка (BA1)."}
+    return {**base, "score": 0.2, "verdict": "Другое", "detail": "Требует проверки."}
 
 def impact_verdict(cons: str) -> dict:
     c = str(cons).lower()
-    base = {"source": "VEP"}
-    if any(k in c for k in ["frameshift", "stop", "splice"]): return {**base, "score": 1.0, "verdict": "LoF", "kind": "predicted", "detail": "Потеря функции."}
-    if "missense" in c: return {**base, "score": 0.6, "verdict": "Missense", "kind": "predicted", "detail": "Замена."}
-    return {**base, "score": 0.2, "verdict": "Слабое", "kind": "predicted", "detail": "Низкое."}
+    base = {"source": "VEP (Вычислительный прогноз)", "kind": "predicted"}
+    if any(k in c for k in ["frameshift", "stop", "splice"]): return {**base, "score": 1.0, "verdict": "LoF (Потеря функции)", "detail": "Высокое воздействие."}
+    if "missense" in c: return {**base, "score": 0.6, "verdict": "Missense", "detail": "Замена аминокислоты."}
+    return {**base, "score": 0.2, "verdict": "Слабое", "detail": "Низкое воздействие."}
 
 _HPO_READY = False
 def phenotype_verdict(patient_terms: list, gene: str) -> dict:
     global _HPO_READY
-    base = {"source": "HPO"}
-    if not patient_terms: return {**base, "score": 0.0, "verdict": "Нет фенотипа", "kind": "missing", "detail": "Не указан."}
+    base = {"source": "HPO (Вычислительный прогноз)", "kind": "predicted"}
+    if not patient_terms: return {**base, "score": 0.0, "verdict": "Нет фенотипа", "detail": "Не указан."}
     try:
         if not _HPO_READY:
             from pyhpo import Ontology
@@ -64,12 +67,12 @@ def phenotype_verdict(patient_terms: list, gene: str) -> dict:
             _HPO_READY = True
         from pyhpo import Ontology, HPOSet
         gene_obj = next((g for g in Ontology.genes if g.name == gene), None)
-        if not gene_obj or not gene_obj.hpo_set(): return {**base, "score": 0.0, "verdict": "Неизвестно", "kind": "missing", "detail": "Нет HPO."}
+        if not gene_obj or not gene_obj.hpo_set(): return {**base, "score": 0.0, "verdict": "Неизвестно", "detail": "Нет HPO для гена."}
         sim = float(HPOSet.from_queries(patient_terms).similarity(gene_obj.hpo_set()))
         v = "Сильное" if sim >= 0.6 else "Умеренное" if sim >= 0.3 else "Слабое"
-        return {**base, "score": sim, "verdict": v, "kind": "computed", "detail": f"Сходство {sim:.2f}."}
+        return {**base, "score": sim, "verdict": v, "detail": f"Сходство {sim:.2f}."}
     except Exception as e:
-        return {**base, "score": 0.0, "verdict": "Ошибка HPO", "kind": "missing", "detail": str(e)}
+        return {**base, "score": 0.0, "verdict": "Ошибка HPO", "detail": str(e)}
 
 def check_inheritance(genotype: str, mode: str) -> float:
     if not mode or mode == "Не учитывать": return 1.0
@@ -107,5 +110,5 @@ def score_case(case: dict, max_af: float = 0.01, inheritance_mode: str = "Не �
     return out.sort_values("priority_score", ascending=False).reset_index(drop=True)
 
 def no_candidate_reason(result: pd.DataFrame) -> str:
-    if result.empty: return "Нет аннотированных вариантов (проверьте колонку gene в файлах)."
-    return "Убедительный кандидат не найден. Все признаки слабые."
+    if result.empty: return "Нет аннотированных вариантов (в файлах _annotated.tsv отсутствует колонка gene)."
+    return "Убедительный кандидат не найден. Все признаки слабые (Сценарий 3)."
