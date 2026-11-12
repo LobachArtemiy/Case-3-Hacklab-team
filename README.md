@@ -10,8 +10,8 @@
 Для работы приложения вам понадобится Python версии 3.9 или выше. Сначала скачайте проект. Если у вас установлен Git, откройте терминал и выполните команду для клонирования репозитория:
 
 ```bash
-git clone https://github.com/LobachArtemiy/variant-prioritizer.git
-cd variant-prioritizer
+git clone https://github.com/LobachArtemiy/Case-3-Hacklab-team.git
+cd Case-3-Hacklab-team
 ```
 
 После того как вы оказались в папке проекта, установите все необходимые зависимости одной командой:
