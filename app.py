@@ -18,8 +18,8 @@ html, body, [data-testid="stAppViewContainer"] { background-color: #F8F9FA !impo
 .db-predicted { background: #EBF8FF; border-left: 3px solid #3182CE; }
 .db-missing { background: #EDF2F7; border-left: 3px solid #A0AEC0; }
 .disease-list { margin-top: 0.5rem; padding-left: 1rem; }
-.disease-item { margin-bottom: 0.5rem; }
-.disease-name { font-weight: 600; color: #2D3748; }
+.disease-item { margin-bottom: 0.75rem; }
+.disease-name { font-weight: 700; color: #2D3748; }
 .symptom-list { font-size: 0.85rem; color: #4A5568; margin-top: 0.25rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -84,7 +84,7 @@ if st.session_state["result"] is not None and st.session_state["case_id"] == sel
             
             def render_verdict(v, title):
                 css_class = "db-confirmed" if v['kind'] == "confirmed" else ("db-predicted" if v['kind'] == "predicted" else "db-missing")
-                st.markdown(f"<div class='verdict-row {css_class}'><b>{title}</b> ({v['source']}): {v['verdict']}. <span style='color:#4A5568;'>{v['detail']}</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='verdict-row {css_class}'><b>{title}</b> ({v['source']}): <b>{v['verdict']}</b>.<br><span style='color:#4A5568;'>{v['detail']}</span></div>", unsafe_allow_html=True)
 
             render_verdict(row["clinvar_verdict"], "Клиническая значимость")
             render_verdict(row["impact_verdict"], "Функциональный эффект")
@@ -93,18 +93,18 @@ if st.session_state["result"] is not None and st.session_state["case_id"] == sel
             
             # --- ВЫВОД БОЛЕЗНЕЙ И СИМПТОМОВ ---
             dv = row["disease_verdict"]
-            st.markdown(f"<div class='verdict-row db-confirmed'><b>Связь с болезнью</b> ({dv['source']}): {dv['detail']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='verdict-row db-confirmed'><b>Связь с болезнью</b> ({dv['source']}): <b>{dv['verdict']}</b>.<br><span style='color:#4A5568;'>{dv['detail']}</span></div>", unsafe_allow_html=True)
             
             if dv["diseases"]:
                 st.markdown("<div class='disease-list'>", unsafe_allow_html=True)
                 for dis in dv["diseases"]:
-                    matched = dis.get("matched_symptoms", [])
-                    matched_str = ", ".join(matched) if matched else "нет прямых совпадений"
+                    matched = dis.get("symptoms_matched", [])
+                    matched_str = ", ".join(matched) if matched else "прямых совпадений не найдено"
                     st.markdown(f"""
                     <div class='disease-item'>
                         <span class='disease-name'>{dis['name']}</span> (OMIM:{dis['id']})
                         <div class='symptom-list'>
-                            <b>Всего симптомов в базе:</b> {dis['symptoms_count']} <br>
+                            <b>Всего симптомов в базе:</b> {dis['symptoms_total']} <br>
                             <b>Совпало с пациентом:</b> {matched_str}
                         </div>
                     </div>
