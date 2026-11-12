@@ -24,42 +24,46 @@ def fetch_vep_details(chrom, pos, ref, alt):
         pass
     return {"gene": "NA", "hgvsp": "Неизвестно", "consequence": "NA"}
 
-# --- Поиск болезней без ошибки _genes ---
+# --- Безопасный поиск болезней (обходим ошибку _genes) ---
 def get_disease_info(gene_name, patient_terms):
     try:
         from pyhpo import Ontology
+        # Ищем объект гена
         gene_obj = next((g for g in Ontology.genes if g.name == gene_name), None)
-        if not gene_obj:
+        if not gene_obj: 
             return {"diseases": [], "detail": "Ген не найден в базе OMIM."}
         
-        # Пытаемся получить болезни напрямую из объекта гена
-        diseases = getattr(gene_obj, "diseases", [])
-        
-        if not diseases:
-            return {"diseases": [], "detail": "Для этого гена нет известных моногенных заболеваний в OMIM."}
-        
         diseases_info = []
-        for disease in diseases:
+        # Перебираем ГЛОБАЛЬНЫЙ список всех болезней, не используя внутренние свойства гена
+        for disease in Ontology.omim_diseases:
             try:
-                disease_hpo_set = disease.hpo_set()
-                disease_symptom_names = [t.name for t in disease_hpo_set]
-                
-                intersection = disease_hpo_set & set(patient_terms)
-                matched_symptom_names = [t.name for t in intersection]
-                
-                diseases_info.append({
-                    "name": disease.name,
-                    "id": disease.id,
-                    "symptoms_total": len(disease_symptom_names),
-                    "symptoms_matched": matched_symptom_names,
-                    "all_symptoms": disease_symptom_names[:15]
-                })
+                # Проверяем, входит ли наш ген в список генов этой болезни
+                gene_names_in_disease = [g.name for g in disease.genes]
+                if gene_name in gene_names_in_disease:
+                    disease_hpo_set = disease.hpo_set()
+                    disease_symptom_names = [t.name for t in disease_hpo_set]
+                    
+                    # Ищем пересечение симптомов болезни и пациента
+                    intersection = disease_hpo_set & set(patient_terms)
+                    matched_symptom_names = [t.name for t in intersection]
+                    
+                    diseases_info.append({
+                        "name": disease.name,
+                        "id": disease.id,
+                        "symptoms_total": len(disease_symptom_names),
+                        "symptoms_matched": matched_symptom_names,
+                        "all_symptoms": disease_symptom_names[:10]
+                    })
             except Exception:
+                # Пропускаем болезни, которые выдают ошибку
                 continue
                 
+        if not diseases_info: 
+            return {"diseases": [], "detail": "Для этого гена нет известных моногенных заболеваний в OMIM."}
+            
         return {"diseases": diseases_info, "detail": f"Найдено {len(diseases_info)} заболеваний."}
     except Exception as e:
-        return {"diseases": [], "detail": f"Ошибка базы OMIM: {str(e)}"}
+        return {"diseases": [], "detail": f"База OMIM недоступна: {str(e)}"}
 
 def load_case(case_id, root):
     meta_files = list(root.rglob(f"{case_id}_metadata.json"))
@@ -215,7 +219,6 @@ def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
     out = pd.DataFrame(rows)
     if out.empty: return out
     
-    # Группируем по гену (берем лучший вариант)
     out = out.sort_values("priority_score", ascending=False).groupby("gene", as_index=False).first()
     out["confidence"] = out["priority_score"].apply(lambda x: "Высокая" if x >= 0.65 else "Средняя" if x >= 0.45 else "Низкая")
     return out.sort_values("priority_score", ascending=False).reset_index(drop=True)
