@@ -28,48 +28,35 @@ else:
     all_meta_files = list(PROJECT_ROOT.rglob("*_metadata.json"))
     case_ids = sorted({p.name.replace("_metadata.json", "") for p in all_meta_files})
 
-# Инициализация сессии, чтобы результаты не пропадали при кликах
 if "result" not in st.session_state:
     st.session_state["result"] = None
     st.session_state["case_id"] = None
-    st.session_state["case_info"] = ""
+    st.session_state["case_raw"] = None
 
 with st.sidebar:
     st.header("Параметры")
     if not case_ids:
         st.error("Файлы данных не найдены.")
         st.stop()
-    
     selected = st.selectbox("Клинический случай", case_ids)
     max_af = st.slider("Порог частоты (gnomAD)", 0.0, 0.05, 0.01, 0.001)
 
 st.title(f"Кейс: {selected}")
 
-# Кнопка первичного анализа
 if st.button("🔬 Проанализировать", use_container_width=True, type="primary"):
-    with st.spinner("Анализ баз данных (ClinVar, OMIM, VEP, HPO)..."):
+    with st.spinner("Анализ баз данных (ClinVar, OMIM, VEP)..."):
         case = load_case(selected, PROJECT_ROOT)
         if case is None:
             st.error("Файлы не найдены.")
             st.stop()
-        
-        # Сохраняем исходные данные в сессию
         st.session_state["case_raw"] = case
         st.session_state["case_id"] = selected
-        st.session_state["case_info"] = f"Вариантов загружено: {len(case['variants'])}"
-        
-        # Базовый расчет (без доп. изменений)
-        result = score_case(case, max_af, inheritance_mode="Не учитывать")
-        st.session_state["result"] = result
+        st.session_state["result"] = score_case(case, max_af, inheritance_mode="Не учитывать")
 
-# Отображение результатов и панели доп. задачи
 if st.session_state["result"] is not None and st.session_state["case_id"] == selected:
     result = st.session_state["result"]
     case = st.session_state["case_raw"]
     
-    st.caption(st.session_state["case_info"])
-    
-    # --- Дополнительная задача ---
     st.markdown("---")
     st.subheader("➕ Дополнительная задача: уточнить клиническую картину")
     st.markdown("Измените симптомы или тип наследования, чтобы увидеть, как это повлияет на рейтинг.")
@@ -87,43 +74,33 @@ if st.session_state["result"] is not None and st.session_state["case_id"] == sel
                 new_feats = [{"type": {"id": t.strip(), "label": ""}} for t in new_hpo.split(",") if t.strip()]
                 case_mod["phenotype"] = dict(case["phenotype"])
                 case_mod["phenotype"]["phenotypicFeatures"] = list(case["phenotype"].get("phenotypicFeatures", [])) + new_feats
-            
-            # Обновляем результат в сессии
             st.session_state["result"] = score_case(case_mod, max_af, inheritance_mode=inh_mode)
-            st.rerun() # Перезагружаем страницу, чтобы обновить таблицу
+            st.rerun()
             
     st.markdown("---")
     
-    # --- Вывод топ-5 ---
     result = st.session_state["result"]
     if result.empty:
-        st.warning("Нет данных для отображения (возможно, гены не найдены).")
+        st.warning(no_candidate_reason(result))
     else:
         top5 = result.head(5)
         st.subheader("Топ-5 генов-кандидатов")
         
         for i, (_, row) in enumerate(top5.iterrows(), 1):
-            with st.container():
-                st.markdown(f"""
-                <div class="verdict-box">
-                    <div class="verdict-title">
-                        {i}. {row['gene']} 
-                        <span class="verdict-badge">Скор: {row['priority_score']}</span>
-                        <span class="verdict-badge">Уверенность: {row['confidence']}</span>
-                    </div>
-                """, unsafe_allow_html=True)
-                
-                def render_verdict(v, title):
-                    css_class = "db-confirmed" if v['kind'] == "confirmed" else ("db-predicted" if v['kind'] == "predicted" else "db-missing")
-                    st.markdown(f"""
-                    <div class="verdict-row {css_class}">
-                        <b>{title}</b> ({v['source']}): {v['verdict']}. <span style="color:#4A5568;font-size:0.85em;">{v['detail']}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
+            st.markdown(f"""
+            <div class="verdict-box">
+                <div class="verdict-title">{i}. {row['gene']} 
+                    <span class="verdict-badge">Скор: {row['priority_score']}</span>
+                    <span class="verdict-badge">Уверенность: {row['confidence']}</span>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            def render_verdict(v, title):
+                css_class = "db-confirmed" if v['kind'] == "confirmed" else ("db-predicted" if v['kind'] == "predicted" else "db-missing")
+                st.markdown(f"<div class='verdict-row {css_class}'><b>{title}</b> ({v['source']}): {v['verdict']}. <span style='color:#4A5568;font-size:0.85em;'>{v['detail']}</span></div>", unsafe_allow_html=True)
 
-                render_verdict(row["clinvar_verdict"], "Клиническая значимость")
-                render_verdict(row["omim_verdict"], "Связь с болезнью")
-                render_verdict(row["clingen_verdict"], "Валидация гена")
-                render_verdict(row["phenotype_verdict"], "Совпадение симптомов")
-                
-                st.markdown("</div>", unsafe_allow_html=True)
+            render_verdict(row["clinvar_verdict"], "Клиническая значимость")
+            render_verdict(row["omim_verdict"], "Связь с болезнью")
+            render_verdict(row["clingen_verdict"], "Валидация гена")
+            render_verdict(row["phenotype_verdict"], "Совпадение симптомов")
+            st.markdown("</div>", unsafe_allow_html=True)
