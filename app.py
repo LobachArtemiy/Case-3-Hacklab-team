@@ -18,9 +18,11 @@ html, body, [data-testid="stAppViewContainer"] { background-color: #F8F9FA !impo
 .db-predicted { background: #EBF8FF; border-left: 3px solid #3182CE; }
 .db-missing { background: #EDF2F7; border-left: 3px solid #A0AEC0; }
 .disease-list { margin-top: 0.5rem; padding-left: 1rem; }
-.disease-item { margin-bottom: 0.75rem; }
-.disease-name { font-weight: 700; color: #2D3748; }
-.symptom-list { font-size: 0.85rem; color: #4A5568; margin-top: 0.25rem; }
+.disease-item { margin-bottom: 1rem; padding: 0.5rem; background: #F7FAFC; border-radius: 4px; }
+.disease-name { font-weight: 700; color: #2D3748; font-size: 1rem; }
+.symptom-list { font-size: 0.85rem; color: #4A5568; margin-top: 0.5rem; }
+.symptom-tag { display: inline-block; background: #E2E8F0; padding: 2px 6px; border-radius: 4px; margin: 2px; font-size: 0.75rem; }
+.symptom-tag.matched { background: #C6F6D5; color: #22543D; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,13 +101,26 @@ if st.session_state["result"] is not None and st.session_state["case_id"] == sel
                 st.markdown("<div class='disease-list'>", unsafe_allow_html=True)
                 for dis in dv["diseases"]:
                     matched = dis.get("symptoms_matched", [])
+                    all_symptoms = dis.get("all_symptoms", [])
+                    
+                    # Формируем HTML для симптомов
+                    symptoms_html = ""
+                    for sym in all_symptoms:
+                        is_matched = sym in matched
+                        css_class = "symptom-tag matched" if is_matched else "symptom-tag"
+                        symptoms_html += f"<span class='{css_class}'>{sym}</span>"
+                    
                     matched_str = ", ".join(matched) if matched else "прямых совпадений не найдено"
+                    
                     st.markdown(f"""
                     <div class='disease-item'>
-                        <span class='disease-name'>{dis['name']}</span> (OMIM:{dis['id']})
+                        <div class='disease-name'>{dis['name']} (OMIM:{dis['id']})</div>
                         <div class='symptom-list'>
                             <b>Всего симптомов в базе:</b> {dis['symptoms_total']} <br>
-                            <b>Совпало с пациентом:</b> {matched_str}
+                            <b>Совпало с пациентом ({len(matched)}):</b> {matched_str}
+                            <br><br>
+                            <b>Примеры симптомов болезни:</b><br>
+                            {symptoms_html}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
