@@ -9,59 +9,57 @@ st.set_page_config(page_title="Приоритизация вариантов", l
 st.markdown("""
 <style>
 :root {
-    --bg: #F4EBE1;          /* тёплый песочный фон */
-    --sidebar: #EADBC8;     /* фон боковой панели */
-    --card-bg: #FCF8F2;     /* цвет слоновой кости для карточек */
-    --text: #3E2723;        /* тёмный шоколадный текст */
-    --accent: #D84315;      /* тёплый терракотовый (кнопки) */
-    --success: #558B2F;     /* оливковый (подтверждено) */
-    --info: #E65100;        /* тёмно-оранжевый (прогнозы) */
-    --muted: #A1887F;       /* тёплый серо-коричневый */
+    --bg: #F4EBE1;
+    --sidebar: #EADBC8;
+    --card-bg: #FCF8F2;
+    --text: #3E2723;
+    --accent: #D84315;
+    --success: #558B2F;
+    --info: #E65100;
+    --muted: #A1887F;
 }
 .stApp { background: var(--bg); color: var(--text); }
 h1, h2, h3, h4 { color: var(--text) !important; }
 [data-testid="stSidebar"] { background: var(--sidebar); }
-.stButton>button { 
-    background: var(--accent); color: #FFF; border-radius: 8px; border: none; 
-}
+.stButton>button { background: var(--accent); color: #FFF; border-radius: 8px; border: none; }
 .stButton>button:hover { background: #BF360C; }
-/* Стили для DataFrame, чтобы фон тоже был тёплым */
 .stDataFrame { background: var(--card-bg); border-radius: 8px; }
-/* Карточки вердиктов */
-.verdict-card { 
-    background: var(--card-bg); 
-    border-left: 5px solid var(--muted); 
-    border-radius: 8px; 
-    padding: 1rem; 
-    margin: 0.5rem 0; 
-    box-shadow: 0 2px 5px rgba(62,39,35,0.1); 
-}
+.verdict-card { background: var(--card-bg); border-left: 5px solid var(--muted); border-radius: 8px; padding: 1rem; margin: 0.5rem 0; box-shadow: 0 2px 5px rgba(62,39,35,0.1); }
 .confirmed { border-left-color: var(--success); }
 .predicted { border-left-color: var(--info); }
 .missing { border-left-color: var(--muted); }
-.badge { 
-    display: inline-block; font-size: 0.75rem; padding: 2px 8px; 
-    border-radius: 10px; background: var(--sidebar); color: var(--text); margin-left: 6px; 
-}
+.badge { display: inline-block; font-size: 0.75rem; padding: 2px 8px; border-radius: 10px; background: var(--sidebar); color: var(--text); margin-left: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
-DATA_DIR = Path(__file__).parent / "data"
-st.title("🧬 Приоритизация генетических вариантов")
+st.title("Приоритизация генетических вариантов")
+
+# --- Поиск файлов (максимально надежный) ---
+project_root = Path(__file__).parent
+all_meta_files = list(project_root.rglob("*_metadata.json"))
+case_ids = sorted({p.name.replace("_metadata.json", "") for p in all_meta_files})
 
 # --- Sidebar ---
 with st.sidebar:
     st.header("Настройки")
-    case_ids = sorted({p.name.replace("_metadata.json", "") for p in DATA_DIR.rglob("case_*_metadata.json")})
-    selected = st.selectbox("Клинический случай", case_ids or ["Нет данных"])
+    if not case_ids:
+        st.error("Файлы данных не найдены. Убедитесь, что папка data с файлами case_* загружена в репозиторий.")
+        st.stop()
+        
+    selected = st.selectbox("Клинический случай", case_ids)
     max_af = st.slider("Порог частоты (gnomAD)", 0.0, 0.05, 0.01, 0.001)
-    st.info("Веса признаков фиксированы по ACMG: Фенотип (0.5), ClinVar (0.3), VEP (0.15), Редкость (0.05).")
+    st.info("Веса фиксированы по ACMG: Фенотип (0.5), ClinVar (0.3), VEP (0.15), Редкость (0.05).")
 
-if selected == "Нет данных":
-    st.warning("Поместите файлы кейсов в папку data.")
+# Загружаем данные
+case = load_case(selected, project_root / "data")
+
+# Проверка на отсутствие аннотаций
+if case["variants"].empty:
+    st.error(f"Файлы вариантов для {selected} пусты.")
     st.stop()
-
-case = load_case(selected, DATA_DIR)
+    
+if "gene" not in case["variants"].columns or case["variants"]["gene"].dropna().eq("NA").all():
+    st.warning("В файлах вариантов нет аннотаций генов (колонка gene = NA). Скоринг не сможет работать. Убедитесь, что вы загрузили правильные файлы `_annotated.tsv`.")
 
 # --- Дополнительная задача ---
 st.header("➕ Дополнительная задача: Изменение параметров")
@@ -74,7 +72,6 @@ with col2:
 case_mod = dict(case)
 if new_hpo.strip():
     new_feats = [{"type": {"id": t.strip(), "label": ""}} for t in new_hpo.split(",") if t.strip()]
-    # Копируем структуру, чтобы не мутировать исходный объект
     case_mod["phenotype"] = dict(case["phenotype"])
     case_mod["phenotype"]["phenotypicFeatures"] = list(case["phenotype"].get("phenotypicFeatures", [])) + new_feats
 
@@ -82,7 +79,9 @@ result = score_case(case_mod, max_af, inheritance_mode=inh_mode)
 
 # --- Отображение ---
 st.header("01. Логика анализа")
-raw_count, rare_count, candidate_count = len(case["variants"]), len(filter_rare(case["variants"], max_af)), len(result)
+raw_count = len(case["variants"])
+rare_count = len(filter_rare(case["variants"], max_af))
+candidate_count = len(result)
 st.dataframe(pd.DataFrame({"Этап": ["Сырые", "После фильтра", "Кандидаты"], "Количество": [raw_count, rare_count, candidate_count]}), hide_index=True)
 
 st.header("02. Точность вариантов")
@@ -98,7 +97,7 @@ else:
     st.dataframe(result[["gene", "priority_score", "confidence", "phenotype_score", "clinvar_score", "inheritance_match"]], use_container_width=True)
     
     top = result.iloc[0]
-    st.subheader(f"🔍 Топ-кандидат: {top['gene']} (скор {top['priority_score']})")
+    st.subheader(f"Топ-кандидат: {top['gene']} (скор {top['priority_score']})")
     
     def render(v, title):
         st.markdown(f"<div class='verdict-card {v['kind']}'><b>{title}</b> — {v['verdict']} <span class='badge'>{v['source']}</span><br><span style='color:#5D4037'>{v['detail']}</span></div>", unsafe_allow_html=True)
@@ -109,5 +108,5 @@ else:
 
 st.header("04. Польза для врача")
 if not result.empty:
-    st.download_button("📄 Скачать отчёт (CSV)", result.to_csv(index=False).encode("utf-8"), f"{selected}_report.csv")
+    st.download_button("Скачать отчёт (CSV)", result.to_csv(index=False).encode("utf-8"), f"{selected}_report.csv")
 st.caption("⚠️ Исследовательский результат. Не является диагнозом.")
