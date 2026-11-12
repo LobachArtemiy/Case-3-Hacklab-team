@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
 from pathlib import Path
-from prioritizer import load_case, score_case, no_candidate_reason
+from prioritizer import load_local_case, process_uploaded_files, score_case, no_candidate_reason
 
 st.set_page_config(page_title="Variant Prioritizer", layout="wide")
 
 st.markdown("""
 <style>
+/* ... стили ... */
 html, body, [data-testid="stAppViewContainer"] { background-color: #F8F9FA !important; font-family: sans-serif; }
 [data-testid="stSidebar"] { background-color: #FFFFFF !important; border-right: 1px solid #E2E8F0; }
 .verdict-box { background: #FFF; border-left: 4px solid #3182CE; border-radius: 6px; padding: 1.25rem; margin-bottom: 1.5rem; border: 1px solid #E2E8F0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
@@ -20,15 +21,13 @@ html, body, [data-testid="stAppViewContainer"] { background-color: #F8F9FA !impo
 .disease-list { margin-top: 0.5rem; padding-left: 1rem; }
 .disease-item { margin-bottom: 1rem; padding: 0.5rem; background: #F7FAFC; border-radius: 4px; border: 1px solid #E2E8F0; }
 .disease-name { font-weight: 700; color: #2D3748; font-size: 1rem; }
-.symptom-list { font-size: 0.85rem; color: #4A5568; margin-top: 0.5rem; }
-.symptom-tag { display: inline-block; background: #E2E8F0; padding: 2px 6px; border-radius: 4px; margin: 2px; font-size: 0.75rem; }
-.symptom-tag.matched { background: #C6F6D5; color: #22543D; font-weight: 600; }
 .aa-change { color: #D69E2E; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 PROJECT_ROOT = Path(__file__).parent
 objects_files = list(PROJECT_ROOT.rglob("objects.tsv"))
+case_ids = []
 if objects_files:
     df_objects = pd.read_csv(objects_files[0], sep="\t")
     case_ids = df_objects["case_id"].tolist()
@@ -43,38 +42,51 @@ if "result" not in st.session_state:
 
 with st.sidebar:
     st.header("Параметры")
-    if not case_ids:
-        st.error("Файлы данных не найдены.")
-        st.stop()
-    selected = st.selectbox("Клинический случай", case_ids)
+    
+    # --- Блок загрузки файлов ---
+    st.subheader("Загрузить свой кейс")
+    st.markdown("Поддерживается VCF или TSV.")
+    uploaded_pheno = st.file_uploader("Фенотип (JSON)", type=["json"])
+    uploaded_var = st.file_uploader("Варианты (TSV или VCF)", type=["tsv", "vcf"])
+    uploaded_label = st.file_uploader("Метки (TSV, опционально)", type=["tsv"])
+    
+    st.divider()
+    
+    st.subheader("Или выберите встроенный")
+    selected = st.selectbox("Клинический случай", case_ids if case_ids else ["Нет"])
     max_af = st.slider("Порог частоты (gnomAD)", 0.0, 0.05, 0.01, 0.001)
 
-st.title(f"Кейс: {selected}")
+st.title("Гибридная система приоритизации")
+st.caption("Экспертные правила + Граф Знаний (HPO) + Статистика")
 
 if st.button("Проанализировать", use_container_width=True, type="primary"):
-    with st.spinner("Анализ баз данных (ClinVar, OMIM, VEP)..."):
-        case = load_case(selected, PROJECT_ROOT)
-        if case is None:
-            st.error("Файлы не найдены.")
-            st.stop()
-        st.session_state["case_raw"] = case
-        st.session_state["case_id"] = selected
-        st.session_state["result"] = score_case(case, max_af, inheritance_mode="Не учитывать")
+    with st.spinner("Анализ..."):
+        # Приоритет у загруженных файлов
+        if uploaded_pheno and uploaded_var:
+            case = process_uploaded_files(uploaded_pheno, uploaded_var, uploaded_label)
+        else:
+            case = load_local_case(selected, PROJECT_ROOT)
+            
+        if case is None or "error" in case:
+            st.error(case.get("error", "Ошибка загрузки данных."))
+        else:
+            st.session_state["case_raw"] = case
+            st.session_state["case_id"] = case["case_id"]
+            st.session_state["result"] = score_case(case, max_af, inheritance_mode="Не учитывать")
 
-if st.session_state["result"] is not None and st.session_state["case_id"] == selected:
+if st.session_state["result"] is not None:
     result = st.session_state["result"]
     case = st.session_state["case_raw"]
+    
+    st.caption(f"Источник данных: {case.get('status', 'Неизвестно')}")
     
     if result.empty:
         st.warning(no_candidate_reason(result))
     else:
         num_found = len(result)
-        if num_found == 1: 
-            st.subheader("Найден 1 ген-кандидат")
-        elif num_found <= 5: 
-            st.subheader(f"Найдено {num_found} гена-кандидата")
-        else: 
-            st.subheader("Топ-5 генов-кандидатов")
+        if num_found == 1: st.subheader("Найден 1 ген-кандидат")
+        elif num_found <= 5: st.subheader(f"Найдено {num_found} гена-кандидата")
+        else: st.subheader("Топ-5 генов-кандидатов")
             
         top5 = result.head(5)
         
@@ -106,40 +118,18 @@ if st.session_state["result"] is not None and st.session_state["case_id"] == sel
             if dv["diseases"]:
                 st.markdown("<div class='disease-list'>", unsafe_allow_html=True)
                 for dis in dv["diseases"]:
-                    matched = dis.get("symptoms_matched", [])
-                    all_symptoms = dis.get("all_symptoms", [])
-                    
-                    symptoms_html = ""
-                    for sym in all_symptoms:
-                        is_matched = sym in matched
-                        css_class = "symptom-tag matched" if is_matched else "symptom-tag"
-                        symptoms_html += f"<span class='{css_class}'>{sym}</span>"
-                    
-                    matched_str = ", ".join(matched) if matched else "прямых совпадений не найдено"
-                    
-                    st.markdown(f"""
-                    <div class='disease-item'>
-                        <div class='disease-name'>{dis['name']} (OMIM:{dis['id']})</div>
-                        <div class='symptom-list'>
-                            <b>Всего симптомов в базе:</b> {dis['symptoms_total']} <br>
-                            <b>Совпало с пациентом ({len(matched)}):</b> {matched_str}
-                            <br><br>
-                            <b>Примеры симптомов болезни:</b><br>
-                            {symptoms_html}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f"<div class='disease-item'><div class='disease-name'>{dis['name']} (OMIM:{dis['id']})</div></div>", unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
                 
             st.markdown("</div>", unsafe_allow_html=True)
             
     st.markdown("---")
-    st.subheader("Дополнительная задача: уточнить клиническую картину")
+    st.subheader("Дополнительная задача")
     col1, col2 = st.columns(2)
     with col1:
-        inh_mode = st.selectbox("Ожидаемый тип наследования", ["Не учитывать", "Доминантный (AD)", "Рецессивный (AR)", "X-сцепленный (XL)"])
+        inh_mode = st.selectbox("Тип наследования", ["Не учитывать", "Доминантный (AD)", "Рецессивный (AR)", "X-сцепленный (XL)"])
     with col2:
-        new_hpo = st.text_input("Добавить HPO-термины (через запятую)", placeholder="HP:0002616, HP:0001643")
+        new_hpo = st.text_input("Добавить HPO (через запятую)", placeholder="HP:0002616")
         
     if st.button("Пересчитать рейтинг", type="secondary"):
         with st.spinner("Пересчет..."):
