@@ -1,0 +1,11 @@
+case_id	split	chromosome	variant_count	phenotype_count
+case_01	development	chr15	406	21
+case_02	development	chr12	408	15
+case_03	development	chr12	408	38
+case_04	development	chr10	407	20
+case_05	development	chr1	415	25
+case_06	development	chr3	415	35
+case_07	hidden	chr2	412	23
+case_08	hidden	chr9	415	5
+case_09	hidden	chr7	407	5
+case_10	hidden	chr18	403	27
