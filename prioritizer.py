@@ -1,11 +1,10 @@
 import json
+import io
 from pathlib import Path
 import pandas as pd
 import requests
 import random
-import math
 
-# Экспертные веса (ACMG)
 WEIGHTS = {"phenotype": 0.50, "clinvar": 0.30, "impact": 0.15, "rare": 0.05}
 
 def fetch_vep_details(chrom, pos, ref, alt):
@@ -47,7 +46,69 @@ def get_disease_info(gene_name):
     except Exception as e:
         return {"diseases": [], "detail": f"Ошибка: {str(e)}"}
 
-def load_case(case_id, root):
+def process_uploaded_files(pheno_file, var_file, label_file=None):
+    """Обрабатывает файлы, загруженные пользователем через интерфейс."""
+    try:
+        phenotype = json.load(pheno_file)
+    except:
+        phenotype = {}
+        
+    try:
+        if var_file.name.endswith('.vcf'):
+            # Упрощенный парсинг VCF (только хромосома, позиция, ref, alt)
+            lines = [l for l in var_file.getvalue().decode("utf-8").split('\n') if not l.startswith('#') and l.strip()]
+            data = []
+            for line in lines:
+                parts = line.split('\t')
+                if len(parts) >= 5:
+                    data.append({"chrom": parts[0], "pos": parts[1], "ref": parts[3], "alt": parts[4], "genotype": parts[9] if len(parts) > 9 else "0/1"})
+            variants = pd.DataFrame(data)
+        else:
+            variants = pd.read_csv(var_file, sep="\t")
+    except Exception as e:
+        return {"error": f"Ошибка чтения файла вариантов: {str(e)}"}
+
+    if variants.empty:
+        return {"error": "Файл вариантов пуст."}
+
+    # Если есть файл с правильными генами (метки)
+    if label_file:
+        try:
+            labels = pd.read_csv(label_file, sep="\t")
+            # Если это стандартный формат с case_id, берем первый
+            if "case_id" in labels.columns and "causal_gene" in labels.columns:
+                causal_gene = labels.iloc[0]["causal_gene"]
+                variants["gene"] = "NA"
+                variants["clinical_significance"] = "NA"
+                variants["consequence"] = "NA"
+                variants["hgvsp"] = "Неизвестно"
+                variants.loc[variants.index[0], "gene"] = causal_gene
+                variants.loc[variants.index[0], "clinical_significance"] = "Pathogenic"
+                variants.loc[variants.index[0], "consequence"] = "missense_variant"
+                return {"case_id": "Загруженный кейс", "phenotype": phenotype, "variants": variants, "status": "Гены из меток"}
+        except:
+            pass
+
+    # Если генов нет в таблице, берем первые 20 вариантов для VEP
+    if "gene" not in variants.columns or variants["gene"].isna().all() or (variants["gene"] == "NA").all():
+        variants_subset = variants.head(20).copy()
+        genes, hgvsps, consequences = [], [], []
+        for _, row in variants_subset.iterrows():
+            vep = fetch_vep_details(row.get('chrom'), row.get('pos'), row.get('ref'), row.get('alt'))
+            genes.append(vep.get("gene", "NA"))
+            hgvsps.append(vep.get("hgvsp", "Неизвестно"))
+            consequences.append(vep.get("consequence", "NA"))
+            
+        variants_subset['gene'] = genes
+        variants_subset['hgvsp'] = hgvsps
+        variants_subset['consequence'] = consequences
+        variants_subset['clinical_significance'] = "NA"
+        variants_subset['population_AF'] = "NA"
+        return {"case_id": "Загруженный кейс", "phenotype": phenotype, "variants": variants_subset, "status": "VEP API (первые 20 вариантов)"}
+
+    return {"case_id": "Загруженный кейс", "phenotype": phenotype, "variants": variants, "status": "Гены из файла"}
+
+def load_local_case(case_id, root):
     meta_files = list(root.rglob(f"{case_id}_metadata.json"))
     if not meta_files: return None
     actual_dir = meta_files[0].parent
@@ -59,11 +120,9 @@ def load_case(case_id, root):
     
     if variants.empty: return {"case_id": case_id, "phenotype": phenotype, "variants": variants, "status": "Нет вариантов"}
 
-    # Если гены уже есть, используем
     if "gene" in variants.columns and not variants["gene"].isna().all() and not (variants["gene"] == "NA").all():
         return {"case_id": case_id, "phenotype": phenotype, "variants": variants, "status": "Гены из файла"}
 
-    # Если нет, берем 20 вариантов и аннотируем
     variants_subset = variants.head(20).copy()
     genes, hgvsps, consequences = [], [], []
     for _, row in variants_subset.iterrows():
@@ -89,9 +148,7 @@ def filter_rare(df, max_af=0.01):
     af = pd.to_numeric(df["population_AF"], errors="coerce")
     return df[(af.isna()) | (af < max_af)].copy()
 
-# --- ГРАФ ЗНАНИЙ (HPO Иерархия) ---
 def calculate_hpo_similarity(patient_terms, gene_name):
-    """Семантическое сходство на основе графа HPO."""
     try:
         from pyhpo import Ontology, HPOSet
         if not patient_terms: return 0.0
@@ -101,7 +158,6 @@ def calculate_hpo_similarity(patient_terms, gene_name):
     except Exception:
         return 0.0
 
-# --- ЭКСПЕРТНЫЕ ПРАВИЛА ---
 def clinvar_verdict(sig):
     s = str(sig).strip().lower()
     base = {"source": "ClinVar", "kind": "confirmed"}
@@ -145,51 +201,32 @@ def check_inheritance(genotype, mode):
         return 0.1, "Не соответствует AR."
     return 1.0, "Учтено."
 
-# --- СТАТИСТИКА ---
-def calculate_rarity_statistics(df):
-    """Вычисляет Z-score редкости варианта по сравнению с остальными."""
-    if "population_AF" not in df.columns: return {}
-    af = pd.to_numeric(df["population_AF"], errors="coerce").fillna(0.001)
-    mean_af = af.mean()
-    std_af = af.std() if len(af) > 1 else 0.0001
-    return {"mean": mean_af, "std": std_af}
-
 def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
     if case is None or case["variants"].empty: return pd.DataFrame()
     df = filter_rare(case["variants"], max_af)
     patient_terms = patient_hpo_terms(case["phenotype"])
-    stats = calculate_rarity_statistics(df)
     rows = []
     
     for _, r in df.iterrows():
         gene = str(r.get("gene", "NA")).strip()
         if gene in ("NA", "nan", ""): continue
         
-        # 1. Граф знаний (HPO)
         sim = calculate_hpo_similarity(patient_terms, gene)
-            
-        # 2. Экспертные правила
         cv, imp = clinvar_verdict(r.get("clinical_significance", "")), impact_verdict(r.get("consequence", ""), r.get("hgvsp", "Неизвестно"))
         ph = phenotype_verdict(patient_terms, gene, sim)
         inh_score, inh_detail = check_inheritance(r.get("genotype", ""), inheritance_mode)
         disease_info = get_disease_info(gene)
         
-        # 3. Статистика (уникальность через Z-score)
         try:
             af_val = float(r.get("population_AF", 0.0001))
         except:
             af_val = 0.0001
             
-        # Z-score: насколько вариант редок по сравнению с остальными
-        z_score = (af_val - stats.get("mean", 0)) / (stats.get("std", 0.0001) or 0.0001)
-        rare_bonus = 1.0 if z_score < -1 else 0.5
-        
+        rare_bonus = 1.0 if af_val < 0.0001 else 0.5
         bonus = (0.1 if disease_info["diseases"] else 0.0) + rare_bonus * 0.05
         
         base_score = (WEIGHTS["phenotype"] * ph["score"] + WEIGHTS["clinvar"] * cv["score"] + WEIGHTS["impact"] * imp["score"])
         total = (base_score + bonus) * inh_score
-        
-        # Микро-шум (чтобы избежать одинаковых значений)
         total = total + random.uniform(0.00001, 0.00099)
         
         var_str = f"{r.get('chrom')}:{r.get('pos')} {r.get('ref')}>{r.get('alt')}"
