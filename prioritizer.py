@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 import pandas as pd
 import requests
-import time
 
 WEIGHTS = {"phenotype": 0.50, "clinvar": 0.30, "impact": 0.15, "rare": 0.05}
 
@@ -18,24 +17,39 @@ def fetch_gene_from_vep(chrom, pos, ref, alt):
         pass
     return "NA"
 
-def check_omim(gene):
+# --- НОВАЯ ФУНКЦИЯ: получение болезней и симптомов ---
+def get_disease_info(gene, patient_terms):
     try:
         from pyhpo import Ontology
+        from pyhpo.annotations import Omim
         gene_obj = next((g for g in Ontology.genes if g.name == gene), None)
-        if not gene_obj:
-            return {"score": 0.0, "detail": "Ген не найден в базе OMIM/HPO"}
-        diseases = gene_obj.diseases
-        if not diseases:
-            return {"score": 0.0, "detail": "Нет известных моногенных заболеваний (OMIM)"}
-        return {"score": 0.8, "detail": f"Связан с {len(diseases)} заболеваниями в OMIM"}
-    except Exception:
-        return {"score": 0.0, "detail": "Ошибка базы OMIM"}
-
-def check_clingen(gene):
-    known_clingen = {"FBN1", "PTPN11", "KMT2D", "FGFR2", "LMNA", "TGFBR2", "BRCA1", "BRCA2"}
-    if gene in known_clingen:
-        return {"score": 1.0, "detail": "Подтвержден ClinGen (Definitive)"}
-    return {"score": 0.5, "detail": "Нет данных ClinGen (или Moderate)"}
+        if not gene_obj: return {"diseases": [], "matched": [], "detail": "Ген отсутствует в базе."}
+        
+        diseases_info = []
+        matched_terms = set()
+        
+        # Проходим по всем болезням, связанным с геном
+        for disease in gene_obj.diseases:
+            # disease.hpo_set() возвращает симптомы болезни
+            disease_hpos = disease.hpo_set()
+            # Находим пересечение симптомов пациента и болезни
+            intersection = disease_hpos & set(patient_terms)
+            
+            diseases_info.append({
+                "name": disease.name,
+                "id": disease.id,
+                "symptoms_count": len(disease_hpos),
+                "matched_symptoms": [t.name for t in intersection]
+            })
+            matched_terms.update(intersection)
+            
+        return {
+            "diseases": diseases_info,
+            "matched_names": [t.name for t in matched_terms],
+            "detail": f"Найдено {len(diseases_info)} заболеваний, совпало {len(matched_terms)} симптомов."
+        }
+    except Exception as e:
+        return {"diseases": [], "matched_names": [], "detail": f"Ошибка: {str(e)}"}
 
 def load_case(case_id, root):
     meta_files = list(root.rglob(f"{case_id}_metadata.json"))
@@ -47,8 +61,7 @@ def load_case(case_id, root):
     phenotype = json.loads(pheno_path.read_text()) if pheno_path.exists() else {}
     variants = pd.read_csv(var_path, sep="\t") if var_path.exists() else pd.DataFrame()
     
-    if variants.empty: 
-        return {"case_id": case_id, "phenotype": phenotype, "variants": variants}
+    if variants.empty: return {"case_id": case_id, "phenotype": phenotype, "variants": variants}
 
     has_genes = False
     if "gene" in variants.columns:
@@ -91,45 +104,38 @@ def filter_rare(df, max_af=0.01):
 def clinvar_verdict(sig):
     s = str(sig).strip().lower()
     base = {"source": "ClinVar", "kind": "confirmed"}
-    if s in ("na", "nan", "", "none"): return {**base, "score": 0.1, "verdict": "Нет данных", "detail": "Вариант не подтвержден."}
-    if "pathogenic" in s and "benign" not in s: return {**base, "score": 1.0, "verdict": "Патогенный", "detail": "Найден патогенный вариант."}
-    if "uncertain" in s: return {**base, "score": 0.5, "verdict": "VUS", "detail": "Неопределенное значение."}
-    if "benign" in s: return {**base, "score": 0.0, "verdict": "Доброкачественный", "detail": "Не причина болезни."}
-    return {**base, "score": 0.2, "verdict": "Другое", "detail": "Требует проверки."}
+    if s in ("na", "nan", "", "none"): return {**base, "score": 0.1, "verdict": "Данных нет", "detail": "Вариант не описан в базе ClinVar."}
+    if "pathogenic" in s and "benign" not in s: return {**base, "score": 1.0, "verdict": "Патогенный", "detail": "База ClinVar классифицирует вариант как патогенный."}
+    if "uncertain" in s: return {**base, "score": 0.5, "verdict": "VUS", "detail": "Вариант с неопределенным значением."}
+    if "benign" in s: return {**base, "score": 0.0, "verdict": "Доброкачественный", "detail": "Вариант не является причиной болезни."}
+    return {**base, "score": 0.2, "verdict": "Противоречивые данные", "detail": "Лаборатории расходятся в оценке."}
 
 def impact_verdict(cons):
     c = str(cons).lower()
     base = {"source": "VEP", "kind": "predicted"}
-    if any(k in c for k in ["frameshift", "stop", "splice"]): return {**base, "score": 1.0, "verdict": "Потеря функции", "detail": "Нарушает структуру белка."}
-    if "missense" in c: return {**base, "score": 0.6, "verdict": "Замена", "detail": "Замена аминокислоты."}
-    return {**base, "score": 0.2, "verdict": "Слабое", "detail": "Низкое воздействие."}
+    if any(k in c for k in ["frameshift", "stop", "splice"]): return {**base, "score": 1.0, "verdict": "Потеря функции", "detail": "Вариант нарушает структуру белка."}
+    if "missense" in c: return {**base, "score": 0.6, "verdict": "Миссенс-мутация", "detail": "Замена аминокислоты."}
+    return {**base, "score": 0.2, "verdict": "Низкое воздействие", "detail": "Не затрагивает структуру белка."}
 
 _HPO_READY = False
-def phenotype_verdict(patient_terms, gene):
-    global _HPO_READY
+def phenotype_verdict(patient_terms, gene, p_sim):
     base = {"source": "HPO", "kind": "predicted"}
-    if not patient_terms: return {**base, "score": 0.0, "verdict": "Нет фенотипа", "detail": "Не указан."}
-    try:
-        if not _HPO_READY:
-            from pyhpo import Ontology
-            _ = Ontology()
-            _HPO_READY = True
-        from pyhpo import Ontology, HPOSet
-        gene_obj = next((g for g in Ontology.genes if g.name == gene), None)
-        if not gene_obj or not gene_obj.hpo_set(): return {**base, "score": 0.0, "verdict": "Неизвестно", "detail": "Нет HPO."}
-        sim = float(HPOSet.from_queries(patient_terms).similarity(gene_obj.hpo_set()))
-        v = "Сильное совпадение" if sim >= 0.6 else "Умеренное" if sim >= 0.3 else "Слабое"
-        return {**base, "score": sim, "verdict": v, "detail": f"Совпадение симптомов на {sim*100:.0f}%."}
-    except Exception as e:
-        return {**base, "score": 0.0, "verdict": "Ошибка", "detail": str(e)}
+    if not patient_terms: return {**base, "score": 0.0, "verdict": "Фенотип не указан", "detail": "Невозможно оценить совпадение."}
+    if p_sim >= 0.6: v = "Сильное совпадение"
+    elif p_sim >= 0.3: v = "Умеренное совпадение"
+    else: v = "Слабое совпадение"
+    return {**base, "score": p_sim, "verdict": v, "detail": f"Совпадение симптомов на {p_sim*100:.0f}%."}
 
 def check_inheritance(genotype, mode):
-    if not mode or mode == "Не учитывать": return 1.0
+    if not mode or mode == "Не учитывать": return 1.0, "Тип наследования не учитывается."
     g = str(genotype).replace(" ", "")
-    if mode == "Доминантный (AD)": return 1.0 if g in ("0/1", "1/0") else 0.1
-    if mode == "Рецессивный (AR)": return 1.0 if g == "1/1" else 0.1
-    if mode == "X-сцепленный (XL)": return 1.0 if g in ("0/1", "1/0", "1/1") else 0.5
-    return 1.0
+    if mode == "Доминантный (AD)":
+        if g in ("0/1", "1/0"): return 1.0, "Генотип гетерозиготный, соответствует доминантному типу."
+        return 0.1, "Генотип не соответствует доминантному типу."
+    if mode == "Рецессивный (AR)":
+        if g == "1/1": return 1.0, "Генотип гомозиготный, соответствует рецессивному типу."
+        return 0.1, "Генотип не соответствует рецессивному типу."
+    return 1.0, "Специфических требований нет."
 
 def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
     if case is None or case["variants"].empty: return pd.DataFrame()
@@ -141,19 +147,31 @@ def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
         gene = str(r.get("gene", "NA")).strip()
         if gene in ("NA", "nan", ""): continue
         
-        cv, imp, ph = clinvar_verdict(r.get("clinical_significance", "")), impact_verdict(r.get("consequence", "")), phenotype_verdict(patient_terms, gene)
-        omim, cg = check_omim(gene), check_clingen(gene)
-        inh = check_inheritance(r.get("genotype", ""), inheritance_mode)
+        try:
+            from pyhpo import Ontology, HPOSet
+            gene_obj = next((g for g in Ontology.genes if g.name == gene), None)
+            sim = float(HPOSet.from_queries(patient_terms).similarity(gene_obj.hpo_set())) if gene_obj and gene_obj.hpo_set() else 0.0
+        except Exception:
+            sim = 0.0
+            
+        cv, imp = clinvar_verdict(r.get("clinical_significance", "")), impact_verdict(r.get("consequence", ""))
+        ph = phenotype_verdict(patient_terms, gene, sim)
+        inh_score, inh_detail = check_inheritance(r.get("genotype", ""), inheritance_mode)
         
-        bonus = (omim["score"] * 0.1) + (cg["score"] * 0.05)
+        # --- Получаем болезни и симптомы ---
+        disease_info = get_disease_info(gene, patient_terms)
+        
+        bonus = 0.1 if disease_info["diseases"] else 0.0
         base_score = (WEIGHTS["phenotype"] * ph["score"] + WEIGHTS["clinvar"] * cv["score"] + WEIGHTS["impact"] * imp["score"] + WEIGHTS["rare"] * 1.0)
-        total = (base_score + bonus) * inh
+        total = (base_score + bonus) * inh_score
+        
+        var_str = f"{r.get('chrom')}:{r.get('pos')} {r.get('ref')}>{r.get('alt')}"
         
         rows.append({
-            "gene": gene, "priority_score": round(total, 3), "phenotype_score": round(ph["score"], 3), "clinvar_score": round(cv["score"], 3),
+            "gene": gene, "variant": var_str, "priority_score": round(total, 3),
             "phenotype_verdict": ph, "clinvar_verdict": cv, "impact_verdict": imp,
-            "omim_verdict": {"source": "OMIM", "kind": "confirmed", "verdict": "Связь с болезнью", "detail": omim["detail"]},
-            "clingen_verdict": {"source": "ClinGen", "kind": "confirmed", "verdict": "Валидация", "detail": cg["detail"]}
+            "disease_verdict": {"source": "OMIM", "kind": "confirmed", "verdict": "Связь с болезнью", "detail": disease_info["detail"], "diseases": disease_info["diseases"]},
+            "inheritance_verdict": {"source": "Наследование", "kind": "predicted", "verdict": "Генотип", "detail": inh_detail}
         })
         
     out = pd.DataFrame(rows)
@@ -162,8 +180,6 @@ def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
     out["confidence"] = out["priority_score"].apply(lambda x: "Высокая" if x >= 0.65 else "Средняя" if x >= 0.45 else "Низкая")
     return out.sort_values("priority_score", ascending=False).reset_index(drop=True)
 
-# ВОТ ОНА, ТА САМАЯ ФУНКЦИЯ, КОТОРОЙ НЕ ХВАТАЛО
 def no_candidate_reason(result):
-    if result is None or result.empty: 
-        return "Нет данных для отображения. Проверьте, что development_labels.tsv загружен в репозиторий."
+    if result is None or result.empty: return "Нет данных для отображения."
     return "Убедительный кандидат не найден."
