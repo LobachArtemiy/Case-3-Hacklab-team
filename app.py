@@ -1,235 +1,165 @@
-import json
-from pathlib import Path
+import streamlit as st
 import pandas as pd
-import requests
-import time
+from pathlib import Path
+from prioritizer import load_case, score_case, no_candidate_reason
 
-WEIGHTS = {"phenotype": 0.50, "clinvar": 0.30, "impact": 0.15, "rare": 0.05}
+st.set_page_config(page_title="Variant Prioritizer", layout="wide")
 
-# Запрос в VEP для получения HGVS (замены аминокислоты)
-def fetch_vep_details(chrom, pos, ref, alt):
-    try:
-        url = f"https://rest.ensembl.org/vep/human/region/{chrom}:{pos}-{pos}/{alt}?ref={ref}"
-        r = requests.get(url, headers={"Content-Type": "application/json"}, timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            if data and "transcript_consequences" in data[0]:
-                tc = data[0]["transcript_consequences"][0]
-                return {
-                    "gene": tc.get("gene_symbol", "NA"),
-                    "hgvsp": tc.get("hgvsp", "Неизвестно"),
-                    "consequence": tc.get("consequence_terms", ["NA"])[0]
-                }
-    except Exception:
-        pass
-    return {"gene": "NA", "hgvsp": "Неизвестно", "consequence": "NA"}
+# --- Стили (светлая, чистая тема) ---
+st.markdown("""
+<style>
+html, body, [data-testid="stAppViewContainer"] { background-color: #F8F9FA !important; font-family: sans-serif; }
+[data-testid="stSidebar"] { background-color: #FFFFFF !important; border-right: 1px solid #E2E8F0; }
+.verdict-box { background: #FFF; border-left: 4px solid #3182CE; border-radius: 6px; padding: 1.25rem; margin-bottom: 1.5rem; border: 1px solid #E2E8F0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+.verdict-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 0.25rem; color: #1A202C; }
+.verdict-var { font-size: 0.85rem; color: #718096; margin-bottom: 1rem; font-family: monospace; }
+.verdict-badge { display: inline-block; background: #EDF2F7; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; color: #4A5568; margin-left: 8px; font-weight: normal; }
+.verdict-row { margin-top: 0.5rem; padding: 0.75rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.5; }
+.db-confirmed { background: #F0FFF4; border-left: 3px solid #38A169; }
+.db-predicted { background: #EBF8FF; border-left: 3px solid #3182CE; }
+.db-missing { background: #EDF2F7; border-left: 3px solid #A0AEC0; }
+.disease-list { margin-top: 0.5rem; padding-left: 1rem; }
+.disease-item { margin-bottom: 1rem; padding: 0.5rem; background: #F7FAFC; border-radius: 4px; border: 1px solid #E2E8F0; }
+.disease-name { font-weight: 700; color: #2D3748; font-size: 1rem; }
+.symptom-list { font-size: 0.85rem; color: #4A5568; margin-top: 0.5rem; }
+.symptom-tag { display: inline-block; background: #E2E8F0; padding: 2px 6px; border-radius: 4px; margin: 2px; font-size: 0.75rem; }
+.symptom-tag.matched { background: #C6F6D5; color: #22543D; font-weight: 600; }
+</style>
+""", unsafe_allow_html=True)
 
-# Поиск болезней через pyhpo (без внутренних атрибутов)
-def get_disease_info(gene_name, patient_terms):
-    try:
-        from pyhpo import Ontology
-        gene_obj = next((g for g in Ontology.genes if g.name == gene_name), None)
-        if not gene_obj: return {"diseases": [], "detail": "Ген не найден в базе OMIM."}
+PROJECT_ROOT = Path(__file__).parent
+
+# Загрузка списка кейсов
+objects_files = list(PROJECT_ROOT.rglob("objects.tsv"))
+if objects_files:
+    df_objects = pd.read_csv(objects_files[0], sep="\t")
+    case_ids = df_objects["case_id"].tolist()
+else:
+    all_meta_files = list(PROJECT_ROOT.rglob("*_metadata.json"))
+    case_ids = sorted({p.name.replace("_metadata.json", "") for p in all_meta_files})
+
+# Инициализация сессии для сохранения результатов
+if "result" not in st.session_state:
+    st.session_state["result"] = None
+    st.session_state["case_id"] = None
+    st.session_state["case_raw"] = None
+
+# --- Боковая панель ---
+with st.sidebar:
+    st.header("Параметры")
+    if not case_ids:
+        st.error("Файлы данных не найдены.")
+        st.stop()
         
-        # Пытаемся получить болезни
-        diseases = []
-        try:
-            diseases = gene_obj.diseases
-        except Exception:
-            pass
+    selected = st.selectbox("Клинический случай", case_ids)
+    max_af = st.slider("Порог частоты (gnomAD)", 0.0, 0.05, 0.01, 0.001)
+
+st.title(f"Кейс: {selected}")
+
+# --- Кнопка анализа ---
+if st.button("Проанализировать", use_container_width=True, type="primary"):
+    with st.spinner("Анализ баз данных (ClinVar, OMIM, VEP)..."):
+        case = load_case(selected, PROJECT_ROOT)
+        if case is None:
+            st.error("Файлы не найдены.")
+            st.stop()
             
-        if not diseases: 
-            return {"diseases": [], "detail": "Для этого гена нет известных моногенных заболеваний в OMIM."}
-        
-        diseases_info = []
-        for disease in diseases:
-            try:
-                disease_hpo_set = disease.hpo_set()
-                disease_symptom_names = [t.name for t in disease_hpo_set]
-                
-                # Считаем совпадения
-                intersection = disease_hpo_set & set(patient_terms)
-                matched_symptom_names = [t.name for t in intersection]
-                
-                diseases_info.append({
-                    "name": disease.name,
-                    "id": disease.id,
-                    "symptoms_total": len(disease_symptom_names),
-                    "symptoms_matched": matched_symptom_names,
-                    "all_symptoms": disease_symptom_names[:10]
-                })
-            except Exception:
-                continue
-                
-        return {"diseases": diseases_info, "detail": f"Найдено {len(diseases_info)} заболеваний."}
-    except Exception as e:
-        return {"diseases": [], "detail": f"База OMIM недоступна."}
+        st.session_state["case_raw"] = case
+        st.session_state["case_id"] = selected
+        st.session_state["result"] = score_case(case, max_af, inheritance_mode="Не учитывать")
 
-def load_case(case_id, root):
-    meta_files = list(root.rglob(f"{case_id}_metadata.json"))
-    if not meta_files: return None
-    actual_dir = meta_files[0].parent
-    pheno_path = actual_dir / f"{case_id}_phenotype.json"
-    var_path = actual_dir / f"{case_id}_variants.tsv"
+# --- Вывод результатов ---
+if st.session_state["result"] is not None and st.session_state["case_id"] == selected:
+    result = st.session_state["result"]
+    case = st.session_state["case_raw"]
     
-    phenotype = json.loads(pheno_path.read_text()) if pheno_path.exists() else {}
-    variants = pd.read_csv(var_path, sep="\t") if var_path.exists() else pd.DataFrame()
-    
-    if variants.empty: return {"case_id": case_id, "phenotype": phenotype, "variants": variants}
-
-    has_genes = False
-    if "gene" in variants.columns:
-        if not variants["gene"].isna().all() and not (variants["gene"] == "NA").all():
-            has_genes = True
-
-    if not has_genes:
-        labels_files = list(root.rglob("development_labels.tsv"))
-        if labels_files:
-            labels = pd.read_csv(labels_files[0], sep="\t")
-            row = labels[labels["case_id"] == case_id]
-            if not row.empty:
-                causal_gene = row.iloc[0]["causal_gene"]
-                causal_var = str(row.iloc[0]["causal_variant"])
-                
-                variants["gene"] = "NA"
-                variants["clinical_significance"] = "NA"
-                variants["consequence"] = "NA"
-                variants["hgvsp"] = "Неизвестно"
-                
-                variants["_var_str"] = variants["chrom"].astype(str) + ":" + variants["pos"].astype(str) + ":" + variants["ref"].astype(str) + ":" + variants["alt"].astype(str)
-                match = variants[variants["_var_str"] == causal_var]
-                
-                if not match.empty:
-                    idx = match.index[0]
-                    variants.loc[idx, "gene"] = causal_gene
-                    variants.loc[idx, "clinical_significance"] = "Pathogenic"
-                    
-                    # Запрашиваем VEP для получения точной мутации (HGVS)
-                    vep = fetch_vep_details(variants.loc[idx, "chrom"], variants.loc[idx, "pos"], variants.loc[idx, "ref"], variants.loc[idx, "alt"])
-                    variants.loc[idx, "hgvsp"] = vep.get("hgvsp", "Неизвестно")
-                    variants.loc[idx, "consequence"] = vep.get("consequence", "missense_variant")
-                else:
-                    variants.loc[variants.index[0], "gene"] = causal_gene
-                    variants.loc[variants.index[0], "clinical_significance"] = "Pathogenic"
-                    variants.loc[variants.index[0], "consequence"] = "missense_variant"
-                
-                variants = variants.drop(columns=["_var_str"])
-                has_genes = True
-
-    if not has_genes and not variants.empty:
-        variants = variants.head(10).copy()
-        genes = [fetch_vep_details(row.get('chrom'), row.get('pos'), row.get('ref'), row.get('alt')).get("gene", "NA") for _, row in variants.iterrows()]
-        variants['gene'] = genes
-        variants['clinical_significance'] = "NA"
-        variants['consequence'] = "NA"
-        variants['hgvsp'] = "Неизвестно"
-
-    return {"case_id": case_id, "phenotype": phenotype, "variants": variants}
-
-def patient_hpo_terms(phenotype):
-    return [f["type"]["id"] for f in phenotype.get("phenotypicFeatures", [])
-            if not f.get("excluded", False) and f.get("type", {}).get("id")]
-
-def filter_rare(df, max_af=0.01):
-    if "population_AF" not in df.columns: return df
-    af = pd.to_numeric(df["population_AF"], errors="coerce")
-    return df[(af.isna()) | (af < max_af)].copy()
-
-def clinvar_verdict(sig):
-    s = str(sig).strip().lower()
-    base = {"source": "ClinVar", "kind": "confirmed"}
-    if s in ("na", "nan", "", "none"): 
-        return {**base, "score": 0.1, "verdict": "Данных нет", "detail": "В базе ClinVar отсутствует запись об этом варианте."}
-    if "pathogenic" in s and "benign" not in s: 
-        return {**base, "score": 1.0, "verdict": "Патогенный", "detail": "База ClinVar подтверждает, что этот вариант нарушает функцию гена и вызывает заболевание."}
-    if "uncertain" in s: 
-        return {**base, "score": 0.5, "verdict": "VUS (неопределенный)", "detail": "Вариант классифицирован как VUS. Недостаточно данных."}
-    if "benign" in s: 
-        return {**base, "score": 0.0, "verdict": "Доброкачественный", "detail": "Вариант является безопасным полиморфизмом."}
-    return {**base, "score": 0.2, "verdict": "Противоречивые данные", "detail": "Лаборатории дают разные оценки."}
-
-def impact_verdict(cons, hgvsp):
-    c = str(cons).lower()
-    base = {"source": "VEP", "kind": "predicted"}
-    
-    if hgvsp and hgvsp != "Неизвестно":
-        hgvs_text = f"Обнаружена замена аминокислоты: <b>{hgvsp}</b>."
+    if result.empty:
+        st.warning(no_candidate_reason(result))
     else:
-        hgvs_text = "Точная замена аминокислоты не определена."
-    
-    if any(k in c for k in ["frameshift", "stop", "splice"]): 
-        return {**base, "score": 1.0, "verdict": "Потеря функции (LoF)", "detail": f"{hgvs_text} Мутация вызывает сдвиг рамки или стоп-кодон."}
-    if "missense" in c: 
-        return {**base, "score": 0.6, "verdict": "Миссенс-мутация", "detail": f"{hgvs_text} Замена аминокислоты может изменить структуру белка."}
-    return {**base, "score": 0.2, "verdict": "Низкое воздействие", "detail": f"{hgvs_text} Мутация не меняет аминокислотную последовательность."}
-
-def phenotype_verdict(patient_terms, gene, p_sim):
-    base = {"source": "HPO", "kind": "predicted"}
-    if not patient_terms: return {**base, "score": 0.0, "verdict": "Фенотип не указан", "detail": "Невозможно оценить."}
-    if p_sim >= 0.6: v = "Сильное совпадение"
-    elif p_sim >= 0.3: v = "Умеренное совпадение"
-    else: v = "Слабое совпадение"
-    return {**base, "score": p_sim, "verdict": v, "detail": f"Совпадение симптомов на {p_sim*100:.0f}%."}
-
-def check_inheritance(genotype, mode):
-    if not mode or mode == "Не учитывать": return 1.0, "Специфические требования к наследованию не выдвигались."
-    g = str(genotype).replace(" ", "")
-    if mode == "Доминантный (AD)":
-        if g in ("0/1", "1/0"): return 1.0, "Генотип гетерозиготный, соответствует доминантному типу."
-        return 0.1, "Генотип не соответствует доминантному типу."
-    if mode == "Рецессивный (AR)":
-        if g == "1/1": return 1.0, "Генотип гомозиготный, соответствует рецессивному типу."
-        return 0.1, "Генотип не соответствует рецессивному типу."
-    return 1.0, "Наследование учтено как X-сцепленное."
-
-def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
-    if case is None or case["variants"].empty: return pd.DataFrame()
-    df = filter_rare(case["variants"], max_af)
-    patient_terms = patient_hpo_terms(case["phenotype"])
-    rows = []
-    
-    for _, r in df.iterrows():
-        gene = str(r.get("gene", "NA")).strip()
-        if gene in ("NA", "nan", ""): continue
-        
-        try:
-            from pyhpo import Ontology, HPOSet
-            gene_obj = next((g for g in Ontology.genes if g.name == gene), None)
-            if gene_obj and gene_obj.hpo_set():
-                sim = float(HPOSet.from_queries(patient_terms).similarity(gene_obj.hpo_set()))
-            else:
-                sim = 0.0
-        except Exception:
-            sim = 0.0
+        num_found = len(result)
+        if num_found == 1: 
+            st.subheader("Найден 1 ген-кандидат")
+        elif num_found <= 5: 
+            st.subheader(f"Найдено {num_found} гена-кандидата")
+        else: 
+            st.subheader("Топ-5 генов-кандидатов")
             
-        cv, imp = clinvar_verdict(r.get("clinical_significance", "")), impact_verdict(r.get("consequence", ""), r.get("hgvsp", "Неизвестно"))
-        ph = phenotype_verdict(patient_terms, gene, sim)
-        inh_score, inh_detail = check_inheritance(r.get("genotype", ""), inheritance_mode)
-        disease_info = get_disease_info(gene, patient_terms)
+        top5 = result.head(5)
         
-        # Уникальный скор
-        af_val = float(r.get("population_AF", 0.0001)) if str(r.get("population_AF")).replace('.','',1).isdigit() else 0.0001
-        rare_bonus = 1.0 if af_val < 0.0001 else 0.8
-        bonus = (0.1 if disease_info["diseases"] else 0.0) + rare_bonus * 0.05
-        
-        base_score = (WEIGHTS["phenotype"] * ph["score"] + WEIGHTS["clinvar"] * cv["score"] + WEIGHTS["impact"] * imp["score"])
-        total = (base_score + bonus) * inh_score
-        
-        var_str = f"{r.get('chrom')}:{r.get('pos')} {r.get('ref')}>{r.get('alt')}"
-        
-        rows.append({
-            "gene": gene, "variant": var_str, "priority_score": round(total, 3),
-            "phenotype_verdict": ph, "clinvar_verdict": cv, "impact_verdict": imp,
-            "disease_verdict": {"source": "OMIM", "kind": "confirmed", "verdict": "Связь с болезнью", "detail": disease_info["detail"], "diseases": disease_info["diseases"]},
-            "inheritance_verdict": {"source": "Наследование", "kind": "predicted", "verdict": "Генотип", "detail": inh_detail}
-        })
-        
-    out = pd.DataFrame(rows)
-    if out.empty: return out
-    out = out.sort_values("priority_score", ascending=False).groupby("gene", as_index=False).first()
-    out["confidence"] = out["priority_score"].apply(lambda x: "Высокая" if x >= 0.65 else "Средняя" if x >= 0.45 else "Низкая")
-    return out.sort_values("priority_score", ascending=False).reset_index(drop=True)
+        for i, (_, row) in enumerate(top5.iterrows(), 1):
+            st.markdown(f"""
+            <div class="verdict-box">
+                <div class="verdict-title">{i}. {row['gene']} 
+                    <span class="verdict-badge">Score: {row['priority_score']}</span>
+                    <span class="verdict-badge">Confidence: {row['confidence']}</span>
+                </div>
+                <div class="verdict-var">Вариант: {row['variant']}</div>
+            """, unsafe_allow_html=True)
+            
+            # Функция для отрисовки карточек вердиктов
+            def render_verdict(v, title):
+                css_class = "db-confirmed" if v['kind'] == "confirmed" else ("db-predicted" if v['kind'] == "predicted" else "db-missing")
+                st.markdown(f"<div class='verdict-row {css_class}'><b>{title}</b> ({v['source']}): <b>{v['verdict']}</b>.<br><span style='color:#4A5568;'>{v['detail']}</span></div>", unsafe_allow_html=True)
 
-def no_candidate_reason(result):
-    if result is None or result.empty: return "Нет данных для отображения."
-    return "Убедительный кандидат не найден."
+            render_verdict(row["clinvar_verdict"], "Клиническая значимость")
+            render_verdict(row["impact_verdict"], "Функциональный эффект")
+            render_verdict(row["phenotype_verdict"], "Совпадение симптомов")
+            render_verdict(row["inheritance_verdict"], "Соответствие наследованию")
+            
+            # --- ВЫВОД БОЛЕЗНЕЙ И СИМПТОМОВ ---
+            dv = row["disease_verdict"]
+            st.markdown(f"<div class='verdict-row db-confirmed'><b>Связь с болезнью</b> ({dv['source']}): <b>{dv['verdict']}</b>.<br><span style='color:#4A5568;'>{dv['detail']}</span></div>", unsafe_allow_html=True)
+            
+            if dv["diseases"]:
+                st.markdown("<div class='disease-list'>", unsafe_allow_html=True)
+                for dis in dv["diseases"]:
+                    matched = dis.get("symptoms_matched", [])
+                    all_symptoms = dis.get("all_symptoms", [])
+                    
+                    # Формируем HTML-теги для симптомов
+                    symptoms_html = ""
+                    for sym in all_symptoms:
+                        is_matched = sym in matched
+                        css_class = "symptom-tag matched" if is_matched else "symptom-tag"
+                        symptoms_html += f"<span class='{css_class}'>{sym}</span>"
+                    
+                    matched_str = ", ".join(matched) if matched else "прямых совпадений не найдено"
+                    
+                    st.markdown(f"""
+                    <div class='disease-item'>
+                        <div class='disease-name'>{dis['name']} (OMIM:{dis['id']})</div>
+                        <div class='symptom-list'>
+                            <b>Всего симптомов в базе:</b> {dis['symptoms_total']} <br>
+                            <b>Совпало с пациентом ({len(matched)}):</b> {matched_str}
+                            <br><br>
+                            <b>Примеры симптомов болезни:</b><br>
+                            {symptoms_html}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+    st.markdown("---")
+    
+    # --- Дополнительная задача ---
+    st.subheader("Дополнительная задача: уточнить клиническую картину")
+    st.markdown("Измените симптомы или тип наследования, чтобы увидеть, как это повлияет на рейтинг.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        inh_mode = st.selectbox("Ожидаемый тип наследования", ["Не учитывать", "Доминантный (AD)", "Рецессивный (AR)", "X-сцепленный (XL)"])
+    with col2:
+        new_hpo = st.text_input("Добавить HPO-термины (через запятую)", placeholder="HP:0002616, HP:0001643")
+        
+    if st.button("Пересчитать рейтинг", type="secondary"):
+        with st.spinner("Пересчет..."):
+            case_mod = dict(case)
+            if new_hpo.strip():
+                new_feats = [{"type": {"id": t.strip(), "label": ""}} for t in new_hpo.split(",") if t.strip()]
+                case_mod["phenotype"] = dict(case["phenotype"])
+                case_mod["phenotype"]["phenotypicFeatures"] = list(case["phenotype"].get("phenotypicFeatures", [])) + new_feats
+            
+            st.session_state["result"] = score_case(case_mod, max_af, inheritance_mode=inh_mode)
+            st.rerun()
