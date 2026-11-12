@@ -1,0 +1,4 @@
+streamlit>=1.30
+pandas>=2.0
+pyhpo>=3.2
+requests>=2.31
