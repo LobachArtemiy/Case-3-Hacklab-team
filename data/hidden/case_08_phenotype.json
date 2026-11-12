@@ -1,0 +1,36 @@
+{
+  "id": "case_08",
+  "sex": "UNKNOWN_SEX",
+  "phenotypicFeatures": [
+    {
+      "type": {
+        "id": "HP:0011470",
+        "label": "Nasogastric tube feeding in infancy"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0011412",
+        "label": "Ventouse delivery"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0008936",
+        "label": "Axial hypotonia"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0001251",
+        "label": "Ataxia"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0002395",
+        "label": "Lower limb hyperreflexia"
+      }
+    }
+  ]
+}

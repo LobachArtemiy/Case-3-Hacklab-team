@@ -1,0 +1,157 @@
+{
+  "id": "case_05",
+  "sex": "MALE",
+  "phenotypicFeatures": [
+    {
+      "type": {
+        "id": "HP:0004421",
+        "label": "Elevated systolic blood pressure"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0000540",
+        "label": "Hypermetropia"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0012492",
+        "label": "Cerebral artery stenosis"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0010296",
+        "label": "Ankyloglossia"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0007394",
+        "label": "Prominent superficial blood vessels"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0000905",
+        "label": "Progressive clavicular acroosteolysis"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0001596",
+        "label": "Alopecia"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0000218",
+        "label": "High palate"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0032556",
+        "label": "Circumoral cyanosis"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0001508",
+        "label": "Failure to thrive"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0002673",
+        "label": "Coxa valga"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0002326",
+        "label": "Transient ischemic attack"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:4000168",
+        "label": "Shark teeth"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0000684",
+        "label": "Delayed eruption of teeth"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0004349",
+        "label": "Reduced bone mineral density"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0003758",
+        "label": "Reduced subcutaneous adipose tissue"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0100324",
+        "label": "Scleroderma"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0000347",
+        "label": "Micrognathia"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0004322",
+        "label": "Short stature"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0009125",
+        "label": "Lipodystrophy"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0000668",
+        "label": "Hypodontia"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0000520",
+        "label": "Proptosis"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0009771",
+        "label": "Osteolytic defects of the phalanges of the hand"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0001070",
+        "label": "Mottled pigmentation"
+      }
+    },
+    {
+      "type": {
+        "id": "HP:0012632",
+        "label": "Abnormal intraocular pressure"
+      },
+      "excluded": true
+    }
+  ]
+}

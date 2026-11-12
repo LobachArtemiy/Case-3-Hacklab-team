@@ -1,0 +1,11 @@
+{
+  "case_id": "case_01",
+  "genome_assembly": "GRCh38",
+  "data_type": "synthetic composite genotype",
+  "background": "GIAB HG002 v4.2.1",
+  "clinical_source": "Phenopacket Store 0.1.11 via Zenodo 14679713",
+  "hpo_version": "2026-09-01",
+  "reference_validation": "NOT_RUN_user_accepted_source_REF",
+  "functional_annotation": "NOT_AVAILABLE",
+  "phenotype_truncated": false
+}
