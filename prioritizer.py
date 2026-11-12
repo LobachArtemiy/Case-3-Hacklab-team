@@ -5,10 +5,15 @@ import pandas as pd
 # Фиксированные веса (научно обоснованные, не меняются пользователем)
 WEIGHTS = {"phenotype": 0.50, "clinvar": 0.30, "impact": 0.15, "rare": 0.05}
 
-def load_case(case_id: str, data_dir: Path) -> dict:
-    # Ищем файлы, даже если они лежат в подпапках (development / hidden)
-    meta_files = list(data_dir.rglob(f"{case_id}_metadata.json"))
-    actual_dir = meta_files[0].parent if meta_files else data_dir
+def load_case(case_id: str, data_dir: Path = None) -> dict:
+    # Ищем файл метаданных во ВСЕЙ папке проекта (даже в подпапках)
+    project_root = Path(__file__).parent
+    meta_files = list(project_root.rglob(f"{case_id}_metadata.json"))
+    
+    if meta_files:
+        actual_dir = meta_files[0].parent
+    else:
+        actual_dir = project_root / "data"
 
     meta_path = actual_dir / f"{case_id}_metadata.json"
     pheno_path = actual_dir / f"{case_id}_phenotype.json"
@@ -82,16 +87,11 @@ def phenotype_verdict(patient_terms: list, gene: str) -> dict:
     return {**base, "score": sim, "verdict": v, "kind": "computed", "detail": f"Сходство {sim:.2f}."}
 
 def check_inheritance(genotype: str, inheritance_mode: str) -> float:
-    """Проверяет, подходит ли генотип под выбранный тип наследования."""
     if not inheritance_mode or inheritance_mode == "Не учитывать": return 1.0
     g = str(genotype).replace(" ", "")
-    
-    if inheritance_mode == "Доминантный (AD)":
-        return 1.0 if g in ("0/1", "1/0") else 0.1
-    if inheritance_mode == "Рецессивный (AR)":
-        return 1.0 if g == "1/1" else 0.1
-    if inheritance_mode == "X-сцепленный (XL)":
-        return 1.0 if g in ("0/1", "1/1", "1/0") else 0.5
+    if inheritance_mode == "Доминантный (AD)": return 1.0 if g in ("0/1", "1/0") else 0.1
+    if inheritance_mode == "Рецессивный (AR)": return 1.0 if g == "1/1" else 0.1
+    if inheritance_mode == "X-сцепленный (XL)": return 1.0 if g in ("0/1", "1/1", "1/0") else 0.5
     return 1.0
 
 # --- Главная функция скоринга ---
@@ -107,10 +107,11 @@ def score_case(case: dict, max_af: float = 0.01, inheritance_mode: str = "Не �
         gene = str(r.get("gene", "NA")).strip()
         if gene in ("NA", "nan", ""): continue
 
-        cv, imp, ph = clinvar_verdict(r.get("clinical_significance", "")), impact_verdict(r.get("consequence", "")), phenotype_verdict(patient_terms, gene)
+        cv = clinvar_verdict(r.get("clinical_significance", ""))
+        imp = impact_verdict(r.get("consequence", ""))
+        ph = phenotype_verdict(patient_terms, gene)
         inh_score = check_inheritance(r.get("genotype", ""), inheritance_mode)
 
-        # Если генотип не подходит под наследование, резко снижаем общий вес
         total = (WEIGHTS["phenotype"] * ph["score"] + WEIGHTS["clinvar"] * cv["score"] + 
                  WEIGHTS["impact"] * imp["score"] + WEIGHTS["rare"] * 1.0) * inh_score
 
@@ -137,7 +138,7 @@ def score_case(case: dict, max_af: float = 0.01, inheritance_mode: str = "Не �
     return out.sort_values("priority_score", ascending=False).reset_index(drop=True)
 
 def no_candidate_reason(result: pd.DataFrame) -> str:
-    if result.empty: return "Не осталось аннотированных вариантов."
+    if result.empty: return "Не осталось аннотированных вариантов (возможно, в файлах _annotated.tsv нет генов)."
     top = result.iloc[0]
     problems = []
     if top["phenotype_score"] < 0.3: problems.append("низкое соответствие фенотипу")
