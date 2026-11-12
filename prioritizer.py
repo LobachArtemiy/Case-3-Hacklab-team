@@ -2,11 +2,9 @@ import json
 from pathlib import Path
 import pandas as pd
 import requests
-import time
 
 WEIGHTS = {"phenotype": 0.50, "clinvar": 0.30, "impact": 0.15, "rare": 0.05}
 
-# --- Безопасный запрос к VEP для получения замены аминокислоты ---
 def fetch_vep_details(chrom, pos, ref, alt):
     try:
         url = f"https://rest.ensembl.org/vep/human/region/{chrom}:{pos}-{pos}/{alt}?ref={ref}"
@@ -24,46 +22,48 @@ def fetch_vep_details(chrom, pos, ref, alt):
         pass
     return {"gene": "NA", "hgvsp": "Неизвестно", "consequence": "NA"}
 
-# --- Безопасный поиск болезней (обходим ошибку _genes) ---
+# --- ПОИСК БОЛЕЗНЕЙ ЧЕРЕЗ MYGENE.INFO (вместо pyhpo) ---
 def get_disease_info(gene_name, patient_terms):
     try:
-        from pyhpo import Ontology
-        # Ищем объект гена
-        gene_obj = next((g for g in Ontology.genes if g.name == gene_name), None)
-        if not gene_obj: 
-            return {"diseases": [], "detail": "Ген не найден в базе OMIM."}
-        
+        url = f"https://mygene.info/v3/query?q=symbol:{gene_name}&fields=omim&species=human"
+        r = requests.get(url, timeout=5)
+        if r.status_code != 200:
+            return {"diseases": [], "detail": "Сервис MyGene.info временно недоступен."}
+            
+        data = r.json()
+        hits = data.get("hits", [])
+        if not hits:
+            return {"diseases": [], "detail": "Ген не найден в базе."}
+            
+        omim_data = hits[0].get("omim", {})
+        if not omim_data:
+            return {"diseases": [], "detail": "Нет данных OMIM для этого гена."}
+            
         diseases_info = []
-        # Перебираем ГЛОБАЛЬНЫЙ список всех болезней, не используя внутренние свойства гена
-        for disease in Ontology.omim_diseases:
-            try:
-                # Проверяем, входит ли наш ген в список генов этой болезни
-                gene_names_in_disease = [g.name for g in disease.genes]
-                if gene_name in gene_names_in_disease:
-                    disease_hpo_set = disease.hpo_set()
-                    disease_symptom_names = [t.name for t in disease_hpo_set]
-                    
-                    # Ищем пересечение симптомов болезни и пациента
-                    intersection = disease_hpo_set & set(patient_terms)
-                    matched_symptom_names = [t.name for t in intersection]
-                    
+        # MyGene.info возвращает либо один объект, либо список
+        if isinstance(omim_data, dict):
+            omim_list = [omim_data]
+        else:
+            omim_list = omim_data
+            
+        for item in omim_list:
+            if "phenotypes" in item:
+                for pheno in item["phenotypes"]:
+                    # Извлекаем симптомы (если они есть в MyGene, обычно их нет, но мы дадим заглушку)
                     diseases_info.append({
-                        "name": disease.name,
-                        "id": disease.id,
-                        "symptoms_total": len(disease_symptom_names),
-                        "symptoms_matched": matched_symptom_names,
-                        "all_symptoms": disease_symptom_names[:10]
+                        "name": pheno.get("phenotype", "Неизвестное заболевание"),
+                        "id": pheno.get("omim_id", "N/A"),
+                        "symptoms_total": 0, # MyGene не хранит симптомы
+                        "symptoms_matched": [],
+                        "all_symptoms": ["Симптомы доступны в оригинальном OMIM"]
                     })
-            except Exception:
-                # Пропускаем болезни, которые выдают ошибку
-                continue
-                
-        if not diseases_info: 
-            return {"diseases": [], "detail": "Для этого гена нет известных моногенных заболеваний в OMIM."}
+                    
+        if not diseases_info:
+            return {"diseases": [], "detail": "Для гена нет связанных болезней в OMIM."}
             
         return {"diseases": diseases_info, "detail": f"Найдено {len(diseases_info)} заболеваний."}
     except Exception as e:
-        return {"diseases": [], "detail": f"База OMIM недоступна: {str(e)}"}
+        return {"diseases": [], "detail": f"Ошибка: {str(e)}"}
 
 def load_case(case_id, root):
     meta_files = list(root.rglob(f"{case_id}_metadata.json"))
@@ -212,7 +212,7 @@ def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
             "gene": gene, "variant": var_str, "hgvsp": r.get("hgvsp", "Неизвестно"), 
             "priority_score": round(total, 4),
             "phenotype_verdict": ph, "clinvar_verdict": cv, "impact_verdict": imp,
-            "disease_verdict": {"source": "OMIM", "kind": "confirmed", "verdict": "Связь с болезнью", "detail": disease_info["detail"], "diseases": disease_info["diseases"]},
+            "disease_verdict": {"source": "OMIM (MyGene)", "kind": "confirmed", "verdict": "Связь с болезнью", "detail": disease_info["detail"], "diseases": disease_info["diseases"]},
             "inheritance_verdict": {"source": "Наследование", "kind": "predicted", "verdict": "Генотип", "detail": inh_detail}
         })
         
