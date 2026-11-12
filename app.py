@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from pathlib import Path
-from prioritizer import load_case, score_case, no_candidate_reason, filter_rare
+from prioritizer import load_case, score_case, no_candidate_reason
 
 st.set_page_config(page_title="Variant Prioritizer", layout="wide")
 
@@ -17,24 +17,31 @@ html, body, [data-testid="stAppViewContainer"] { background-color: #F8F9FA !impo
 """, unsafe_allow_html=True)
 
 PROJECT_ROOT = Path(__file__).parent
-all_meta_files = list(PROJECT_ROOT.rglob("*_metadata.json"))
-case_ids = sorted({p.name.replace("_metadata.json", "") for p in all_meta_files})
+objects_files = list(PROJECT_ROOT.rglob("objects.tsv"))
+if objects_files:
+    df_objects = pd.read_csv(objects_files[0], sep="\t")
+    case_ids = df_objects["case_id"].tolist()
+else:
+    all_meta_files = list(PROJECT_ROOT.rglob("*_metadata.json"))
+    case_ids = sorted({p.name.replace("_metadata.json", "") for p in all_meta_files})
 
 with st.sidebar:
     st.header("Параметры")
     if not case_ids:
-        st.error("Файлы данных не найдены. Загрузите папку data.")
+        st.error("Файлы данных не найдены.")
         st.stop()
+    
     selected = st.selectbox("Клинический случай", case_ids)
     max_af = st.slider("Порог частоты (gnomAD)", 0.0, 0.05, 0.01, 0.001)
     
     st.divider()
     st.subheader("Дополнительно")
-    inh_mode = st.selectbox("Тип наследования", ["Не учитывать", "Доминантный (AD)", "Рецессивный (AR)"])
+    inh_mode = st.selectbox("Тип наследования", ["Не учитывать", "Доминантный (AD)", "Рецессивный (AR)", "X-сцепленный (XL)"])
     new_hpo = st.text_input("Добавить HPO", placeholder="HP:0002616, HP:0001643")
 
-# Мгновенная загрузка
-case = load_case(selected, PROJECT_ROOT)
+with st.spinner("Запрос к ClinVar, OMIM, ClinGen, VEP..."):
+    case = load_case(selected, PROJECT_ROOT)
+
 if case is None:
     st.error(f"Файлы для {selected} не найдены.")
     st.stop()
@@ -42,7 +49,6 @@ if case is None:
 st.title(f"Кейс: {selected}")
 st.caption(f"Вариантов загружено: {len(case['variants'])}")
 
-# Доп. задача
 case_mod = dict(case)
 if new_hpo.strip():
     new_feats = [{"type": {"id": t.strip(), "label": ""}} for t in new_hpo.split(",") if t.strip()]
@@ -63,9 +69,12 @@ else:
     def render(v, title):
         st.markdown(f"<div class='verdict-card {v['kind']}'><b>{title}</b>: {v['verdict']} <span class='badge'>{v['source']}</span><br><span style='color:#4A5568; font-size:0.9em;'>{v['detail']}</span></div>", unsafe_allow_html=True)
 
+    # Теперь выводим ВСЕ базы данных
     render(top["clinvar_verdict"], "База ClinVar")
+    render(top["omim_verdict"], "База OMIM")
+    render(top["clingen_verdict"], "Валидация ClinGen")
     render(top["phenotype_verdict"], "Сопоставление HPO")
-    render(top["impact_verdict"], "Функциональный эффект")
+    render(top["impact_verdict"], "Функциональный эффект (VEP)")
     
     st.divider()
     st.download_button("Скачать отчёт (CSV)", result.to_csv(index=False).encode("utf-8"), f"{selected}_report.csv", "text/csv")
