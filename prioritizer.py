@@ -6,10 +6,11 @@ import time
 
 WEIGHTS = {"phenotype": 0.50, "clinvar": 0.30, "impact": 0.15, "rare": 0.05}
 
+# --- Безопасный запрос к VEP для получения замены аминокислоты ---
 def fetch_vep_details(chrom, pos, ref, alt):
     try:
         url = f"https://rest.ensembl.org/vep/human/region/{chrom}:{pos}-{pos}/{alt}?ref={ref}"
-        r = requests.get(url, headers={"Content-Type": "application/json"}, timeout=3)
+        r = requests.get(url, headers={"Content-Type": "application/json"}, timeout=5)
         if r.status_code == 200:
             data = r.json()
             if data and "transcript_consequences" in data[0]:
@@ -23,21 +24,18 @@ def fetch_vep_details(chrom, pos, ref, alt):
         pass
     return {"gene": "NA", "hgvsp": "Неизвестно", "consequence": "NA"}
 
-# --- ИСПРАВЛЕННЫЙ ПОИСК БОЛЕЗНЕЙ (официальный API) ---
+# --- Поиск болезней без ошибки _genes ---
 def get_disease_info(gene_name, patient_terms):
     try:
         from pyhpo import Ontology
         gene_obj = next((g for g in Ontology.genes if g.name == gene_name), None)
-        if not gene_obj: 
+        if not gene_obj:
             return {"diseases": [], "detail": "Ген не найден в базе OMIM."}
         
-        # Официальный перебор OMIM-болезней
-        diseases = []
-        for disease in Ontology.omim_diseases:
-            if gene_obj in disease.genes:
-                diseases.append(disease)
+        # Пытаемся получить болезни напрямую из объекта гена
+        diseases = getattr(gene_obj, "diseases", [])
         
-        if not diseases: 
+        if not diseases:
             return {"diseases": [], "detail": "Для этого гена нет известных моногенных заболеваний в OMIM."}
         
         diseases_info = []
@@ -128,48 +126,48 @@ def clinvar_verdict(sig):
     s = str(sig).strip().lower()
     base = {"source": "ClinVar", "kind": "confirmed"}
     if s in ("na", "nan", "", "none"): 
-        return {**base, "score": 0.1, "verdict": "Данных нет", "detail": "В базе ClinVar нет записей. Клиническая значимость неизвестна."}
+        return {**base, "score": 0.1, "verdict": "Данных нет", "detail": "В базе ClinVar нет записей."}
     if "pathogenic" in s and "benign" not in s: 
-        return {**base, "score": 1.0, "verdict": "Патогенный", "detail": "База ClinVar подтверждает, что вариант нарушает функцию гена и вызывает заболевание."}
+        return {**base, "score": 1.0, "verdict": "Патогенный", "detail": "База ClinVar подтверждает патогенность."}
     if "uncertain" in s: 
-        return {**base, "score": 0.5, "verdict": "VUS", "detail": "Вариант неопределенного значения. Недостаточно данных."}
+        return {**base, "score": 0.5, "verdict": "VUS", "detail": "Неопределенное значение."}
     if "benign" in s: 
-        return {**base, "score": 0.0, "verdict": "Доброкачественный", "detail": "Безопасный полиморфизм, не связанный с болезнью."}
-    return {**base, "score": 0.2, "verdict": "Противоречивые данные", "detail": "Разные лаборатории дают разные оценки."}
+        return {**base, "score": 0.0, "verdict": "Доброкачественный", "detail": "Безопасный полиморфизм."}
+    return {**base, "score": 0.2, "verdict": "Противоречивые данные", "detail": "Разные оценки."}
 
 def impact_verdict(cons, hgvsp):
     c = str(cons).lower()
     base = {"source": "VEP", "kind": "predicted"}
     
     if hgvsp and hgvsp != "Неизвестно":
-        hgvs_text = f"Обнаружена замена аминокислоты: <b>{hgvsp}</b>."
+        hgvs_text = f"Обнаружена замена: <b>{hgvsp}</b>."
     else:
         hgvs_text = "Точная замена не определена."
     
     if any(k in c for k in ["frameshift", "stop", "splice"]): 
-        return {**base, "score": 1.0, "verdict": "Потеря функции", "detail": f"{hgvs_text} Сдвиг рамки или стоп-кодон разрушает белок."}
+        return {**base, "score": 1.0, "verdict": "Потеря функции", "detail": f"{hgvs_text} Сдвиг рамки или стоп-кодон."}
     if "missense" in c: 
-        return {**base, "score": 0.6, "verdict": "Миссенс-мутация", "detail": f"{hgvs_text} Замена аминокислоты может изменить структуру и функцию белка."}
-    return {**base, "score": 0.2, "verdict": "Низкое воздействие", "detail": f"{hgvs_text} Синонимичная замена."}
+        return {**base, "score": 0.6, "verdict": "Миссенс-мутация", "detail": f"{hgvs_text} Может изменить структуру белка."}
+    return {**base, "score": 0.2, "verdict": "Низкое воздействие", "detail": f"{hgvs_text} Не меняет последовательность."}
 
 def phenotype_verdict(patient_terms, gene, p_sim):
     base = {"source": "HPO", "kind": "predicted"}
-    if not patient_terms: return {**base, "score": 0.0, "verdict": "Фенотип не указан", "detail": "Невозможно сопоставить."}
+    if not patient_terms: return {**base, "score": 0.0, "verdict": "Фенотип не указан", "detail": "Невозможно оценить."}
     if p_sim >= 0.6: v = "Сильное совпадение"
     elif p_sim >= 0.3: v = "Умеренное совпадение"
     else: v = "Слабое совпадение"
     return {**base, "score": p_sim, "verdict": v, "detail": f"Совпадение симптомов на {p_sim*100:.0f}%."}
 
 def check_inheritance(genotype, mode):
-    if not mode or mode == "Не учитывать": return 1.0, "Специфические требования к наследованию не выдвигались."
+    if not mode or mode == "Не учитывать": return 1.0, "Требований нет."
     g = str(genotype).replace(" ", "")
     if mode == "Доминантный (AD)":
-        if g in ("0/1", "1/0"): return 1.0, "Гетерозигота соответствует доминантному типу."
-        return 0.1, "Не соответствует доминантному типу."
+        if g in ("0/1", "1/0"): return 1.0, "Гетерозигота соответствует AD."
+        return 0.1, "Не соответствует AD."
     if mode == "Рецессивный (AR)":
-        if g == "1/1": return 1.0, "Гомозигота соответствует рецессивному типу."
-        return 0.1, "Не соответствует рецессивному типу."
-    return 1.0, "Учтено как X-сцепленное."
+        if g == "1/1": return 1.0, "Гомозигота соответствует AR."
+        return 0.1, "Не соответствует AR."
+    return 1.0, "Учтено."
 
 def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
     if case is None or case["variants"].empty: return pd.DataFrame()
@@ -193,14 +191,13 @@ def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
         inh_score, inh_detail = check_inheritance(r.get("genotype", ""), inheritance_mode)
         disease_info = get_disease_info(gene, patient_terms)
         
-        # Уникальный скор на основе AF (чтобы избежать одинаковых баллов)
         try:
             af_val = float(r.get("population_AF", 0.0001))
         except:
             af_val = 0.0001
             
         rare_bonus = 1.0 if af_val < 0.0001 else 0.5
-        bonus = (0.15 if disease_info["diseases"] else 0.0) + rare_bonus * 0.05
+        bonus = (0.1 if disease_info["diseases"] else 0.0) + rare_bonus * 0.05
         
         base_score = (WEIGHTS["phenotype"] * ph["score"] + WEIGHTS["clinvar"] * cv["score"] + WEIGHTS["impact"] * imp["score"])
         total = (base_score + bonus) * inh_score
@@ -209,7 +206,7 @@ def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
         
         rows.append({
             "gene": gene, "variant": var_str, "hgvsp": r.get("hgvsp", "Неизвестно"), 
-            "priority_score": round(total, 4), # Округляем до 4 знаков для уникальности
+            "priority_score": round(total, 4),
             "phenotype_verdict": ph, "clinvar_verdict": cv, "impact_verdict": imp,
             "disease_verdict": {"source": "OMIM", "kind": "confirmed", "verdict": "Связь с болезнью", "detail": disease_info["detail"], "diseases": disease_info["diseases"]},
             "inheritance_verdict": {"source": "Наследование", "kind": "predicted", "verdict": "Генотип", "detail": inh_detail}
@@ -218,7 +215,7 @@ def score_case(case, max_af=0.01, inheritance_mode="Не учитывать"):
     out = pd.DataFrame(rows)
     if out.empty: return out
     
-    # Группируем по гену (оставляем лучший вариант)
+    # Группируем по гену (берем лучший вариант)
     out = out.sort_values("priority_score", ascending=False).groupby("gene", as_index=False).first()
     out["confidence"] = out["priority_score"].apply(lambda x: "Высокая" if x >= 0.65 else "Средняя" if x >= 0.45 else "Низкая")
     return out.sort_values("priority_score", ascending=False).reset_index(drop=True)
